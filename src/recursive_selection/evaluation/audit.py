@@ -64,18 +64,22 @@ def audit_selection(
         and 1 <= min_groups <= len(groups.group_ids),
         "invalid minimum group count",
     )
-    from ..policies import CVReferenceQualityPolicy
+    from ..policies import CVReferenceQualityPolicy, CVF1ReferenceQualityPolicy
 
     require(
         result.gate_metrics
         == getattr(quality_policy, "gate_metrics", tuple(METRIC_NAMES)),
         "gate metrics differ from the quality policy",
     )
-    cv_mode = isinstance(quality_policy, CVReferenceQualityPolicy)
+    external_cv = isinstance(quality_policy, CVF1ReferenceQualityPolicy)
+    cv_mode = external_cv or isinstance(quality_policy, CVReferenceQualityPolicy)
     if cv_mode:
-        from ..cross_validation import validate_cv_trace
-
-        validate_cv_trace(result, quality_policy)
+        if external_cv:
+            from ..fixed_cv import validate_fixed_cv_trace
+            validate_fixed_cv_trace(result, quality_policy)
+        else:
+            from ..cross_validation import validate_cv_trace
+            validate_cv_trace(result, quality_policy)
     elif result.cv_evaluation is not None:
         raise ValueError("CV results require CVReferenceQualityPolicy for audit.")
     reference = result.cv_evaluation.baseline if cv_mode else result.baseline_metrics
@@ -344,7 +348,14 @@ def audit_selection(
         ),
         ("Groups rejected before later acceptance", str(len(retry)), "Observed"),
     ]
-    if cv_mode:
+    if external_cv:
+        observations.extend([
+            ('Gate score source', 'Fixed Full mean macro F1 on supplied Validation folds', 'Verified'),
+            ('Train/Validation separation',
+             f'{len(result.cv_evaluation.folds)} external folds; Validation monitors loss and scores F1', 'Verified'),
+            ('Development refit budget', 'Ceiling median of each accepted candidate\'s best fold rounds; no eval_set', 'Verified'),
+        ])
+    elif cv_mode:
         observations.extend(
             [
                 (

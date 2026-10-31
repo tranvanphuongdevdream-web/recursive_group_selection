@@ -5,7 +5,7 @@ from dataclasses import asdict
 import numpy as np
 
 from ..acceleration import removed_ids
-from ..results import CVPrunedEvaluation
+from ..results import CVPrunedEvaluation, FixedCVEvaluationTrace
 from ..groups import FeatureGroups
 from ..plotting.importance import importance_evolution_data
 from ..plotting.retries import retry_history_data
@@ -306,9 +306,9 @@ class SelectionReport:
             ]
         )
 
-        self.score_source = (
-            "Train CV mean" if result.cv_evaluation is not None else "Validation"
-        )
+        external_cv = isinstance(result.cv_evaluation, FixedCVEvaluationTrace)
+        self.score_source = ('Validation CV mean' if external_cv else
+            'Train CV mean' if result.cv_evaluation is not None else 'Validation')
         if result.cv_evaluation is not None:
             trace = result.cv_evaluation
             self.trials["Score source"] = [
@@ -330,16 +330,17 @@ class SelectionReport:
                     {
                         "Fold": number,
                         "Role": role,
-                        "Train row": int(row),
+                        ('Development row' if external_cv else 'Train row'): int(row),
                         "Class": trace.labels[row],
                         **({"Group": trace.group_ids[row]} if trace.grouped else {}),
                     }
                     for number, fold in enumerate(trace.folds, 1)
-                    for role, rows in (
+                    for role, rows in ((('Train', fold.train_rows),
+                                        ('Validation (stopping and scoring)', fold.validation_rows)) if external_cv else (
                         ("Fit", fold.train_rows),
                         ("Early stopping", fold.stopping_rows),
                         ("Held out", fold.heldout_rows),
-                    )
+                    ))
                     for row in rows
                 ]
             )
@@ -353,6 +354,7 @@ class SelectionReport:
                             if isinstance(summary, CVPrunedEvaluation)
                             else "Complete"
                         ),
+                        **({'Best boosting rounds': trace.best_rounds[trial][fold-1]} if external_cv else {}),
                         **{
                             label: getattr(scores, key)
                             for key, label in METRIC_NAMES.items()
@@ -374,7 +376,7 @@ class SelectionReport:
                         "Margin": getattr(trace.final.mean, key)
                         - getattr(result.effective_floors, key),
                     }
-                    for key, label in METRIC_NAMES.items()
+                    for key, label in METRIC_NAMES.items() if key in result.gate_metrics
                 ]
             )
             extra = [
@@ -416,6 +418,24 @@ class SelectionReport:
                 ],
                 ignore_index=True,
             )
+            if external_cv:
+                accepted_budgets = {state.trial_id: budget for state, budget in
+                                    zip(result.accepted_history, trace.refit_rounds)}
+                self.cv_summary = pd.DataFrame([
+                    {'Trial': trial, 'Accepted': trial in accepted_budgets,
+                     'Refit boosting rounds': accepted_budgets.get(trial),
+                     **{f'{label} {stat}': getattr(getattr(summary, attr), key)
+                        for key, label in METRIC_NAMES.items()
+                        for stat, attr in [('mean', 'mean'), ('SD', 'standard_deviation'),
+                                           ('SE', 'standard_error')]}}
+                    for trial, summary in enumerate((trace.baseline, *trace.trials))])
+                # Refits have no Validation prediction; all scoring is counted in CV.
+                self.selection_costs = self.selection_costs.loc[
+                    self.selection_costs.Stage != 'Validation prediction'].copy()
+                self.selection_costs.loc[self.selection_costs.Stage == 'Trial training', 'Stage'] = 'Accepted development refits'
+                self.selection_costs = pd.concat([self.selection_costs, pd.DataFrame([
+                    {'Stage': 'Full development refit', 'Calls': 1,
+                     'Time (s)': times['full_training_seconds']}])], ignore_index=True)
 
         self.gate_constraints = (
             self.cv_constraints.copy()
@@ -484,6 +504,8 @@ class SelectionReport:
             "elimination_loop_time_seconds": r.timings["elimination_loop_seconds"],
             "score_source": self.score_source,
             "scope": (
+                'External-Validation-CV mean-F1-constrained greedy selection; fixed Full reference; no test guarantee'
+                if isinstance(r.cv_evaluation, FixedCVEvaluationTrace) else
                 "Train-CV-constrained greedy selection; baseline mean minus SE is a heuristic, not a test guarantee"
                 if r.cv_evaluation is not None
                 else "Validation-constrained greedy selection; no global minimum or test guarantee"
@@ -518,6 +540,8 @@ class SelectionReport:
                     f"{prefix}_cv_gate_constraints.csv": self.cv_constraints,
                 }
             )
+            if isinstance(self.result.cv_evaluation, FixedCVEvaluationTrace):
+                tables[f'{prefix}_cv_summary.csv'] = self.cv_summary
         generated = self.metadata()
         if set(metadata or {}).intersection(generated):
             raise ValueError(

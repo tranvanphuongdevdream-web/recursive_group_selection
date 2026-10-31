@@ -175,3 +175,19 @@ class F1ReferenceQualityPolicy:
 
     def to_config(self):
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class CVF1ReferenceQualityPolicy(F1ReferenceQualityPolicy):
+    """Accept complete external-fold mean macro F1 against the fixed Full mean.
+
+    No SD/SE allowance is subtracted. Other macro metrics remain diagnostics.
+    Use with fit_cv(); the single-Validation and Train-only CV modes are unchanged.
+    """
+
+    def thresholds(self, baseline):
+        from .results import CVScoreSummary
+
+        if not isinstance(baseline, CVScoreSummary):
+            raise TypeError('CVF1ReferenceQualityPolicy requires a full CVScoreSummary.')
+        return super().thresholds(baseline.mean)

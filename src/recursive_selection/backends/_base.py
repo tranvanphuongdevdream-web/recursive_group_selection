@@ -35,6 +35,38 @@ class BaseModelAdapter:
     def new_model(self):
         return self.model_class()(**deepcopy(self.params))
 
+    def refit(self, X, y, rounds):
+        """Fresh fixed-budget development fit, without validation/early stopping.
+
+        Fold-only callbacks are intentionally not reused. LightGBM may still stop
+        intrinsically when no valid split remains; rounds is the requested budget.
+        """
+        if isinstance(rounds, bool) or not isinstance(rounds, Integral) or rounds < 1:
+            raise ValueError('Refit rounds must be a positive integer.')
+        params, options = deepcopy(self.params), deepcopy(self.fit_params)
+        for key in ('early_stopping_rounds', 'early_stopping_round', 'early_stopping', 'callbacks',
+                    'use_best_model', 'od_type', 'od_wait', 'od_pval'):
+            params.pop(key, None)
+            options.pop(key, None)
+        options.pop('eval_metric', None)
+        if self.backend_name == 'catboost':
+            for key in ('iterations', 'n_estimators', 'num_boost_round', 'num_trees'):
+                params.pop(key, None)
+            params.update(iterations=int(rounds), use_best_model=False)
+        elif self.backend_name == 'lightgbm':
+            for key in ('num_iterations', 'num_iteration', 'n_iter', 'num_tree', 'num_trees',
+                        'num_round', 'num_rounds', 'nrounds', 'num_boost_round',
+                        'n_estimators', 'max_iter'):
+                params.pop(key, None)
+            params['n_estimators'] = int(rounds)
+        elif self.backend_name == 'xgboost':
+            params['n_estimators'] = int(rounds)
+        else:
+            raise NotImplementedError('Custom CV adapters must implement refit().')
+        model = self.model_class()(**params)
+        model.fit(X, y, **options)
+        return model
+
     def stopping_rounds(self, options):
         if "early_stopping_rounds" in options:
             return options.pop("early_stopping_rounds")

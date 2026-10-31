@@ -54,11 +54,12 @@ class EvaluationComparison:
 
     def validation_constraints(self, *, policy, baseline, split="Validation"):
         import pandas as pd
-        from ..policies import CVReferenceQualityPolicy
+        from ..policies import CVReferenceQualityPolicy, CVF1ReferenceQualityPolicy
 
-        if isinstance(policy, CVReferenceQualityPolicy):
+        if isinstance(policy, (CVReferenceQualityPolicy, CVF1ReferenceQualityPolicy)):
+            source = 'Validation CV' if isinstance(policy, CVF1ReferenceQualityPolicy) else 'Train CV'
             raise ValueError(
-                "CV gate constraints use Train CV scores; use SelectionReport.cv_constraints, not outer Validation metrics."
+                f"CV gate constraints use {source} scores; use SelectionReport.cv_constraints, not outer Validation metrics."
             )
         floors = policy.thresholds(baseline)
         actual = self.reference[split].metrics

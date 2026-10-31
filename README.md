@@ -721,6 +721,108 @@ Audits replay the recorded greedy rules, larger-ID importance ties and rejection
 reset, including minimum-group stopping and no-removal runs. They do not establish
 data provenance, independence or a global minimum.
 
+## External-fold mean F1 selection matching a baseline
+
+Use `fit_cv()` when the baseline already has fixed development Train/Validation
+folds. This is an opt-in protocol, separate from single-Validation `fit()` and
+the Train-only CV gate described below. Neither existing protocol changes.
+
+```python
+from recursive_selection import (
+    RecursiveFeatureSelector, CatBoostAdapter,
+    CVF1ReferenceQualityPolicy, BatchRemovalOptions,
+)
+
+selector = RecursiveFeatureSelector(
+    model_adapter=CatBoostAdapter(
+        params={"iterations": 1000, "depth": 4, "learning_rate": 0.03,
+                "loss_function": "MultiClass", "eval_metric": "MultiClass",
+                "random_seed": 42, "thread_count": 2,
+                "verbose": False, "allow_writing_files": False},
+        early_stopping_rounds=5,
+    ),
+    quality_policy=CVF1ReferenceQualityPolicy(),
+    speed_options=BatchRemovalOptions(removal_fraction=0.1),
+)
+selector.fit_cv(
+    X_dev, y_dev,
+    cv_splits=baseline_folds,       # [(train_indices, validation_indices), ...]
+    cv_groups=development_groups,   # original recording or time-block IDs
+    feature_names=feature_names,
+)
+selected_model = selector.estimator_
+print("Final fixed refit budget:", selector.refit_rounds_)
+# Only after selection is frozen:
+test_predictions = selector.predict(X_test)
+```
+
+`cv_splits` indexes **X_dev locally**, not the original complete dataset. At least
+two folds are required; four is a caller choice rather than a library constant.
+Each fold must partition development into disjoint, nonempty, class-complete
+Train/Validation sets, and every development row must appear in Validation exactly
+once. Supplied `cv_groups` stay disjoint within every fold. For recording/time-block
+experiments, supply the actual composite IDs used by the baseline (including the
+condition when IDs are only unique within a condition). The library does not
+construct or reshuffle these folds and never accepts a separate Test set.
+`RecursiveGroupSelector.fit_cv()` also requires its usual `feature_groups` mapping.
+
+The caller supplies the same fixed model hyperparameters, training seed and loss
+monitor as the baseline; there is no per-trial hyperparameter search. Full and
+every trial train a **fresh model for every fold**. Validation selects the
+early-stopping checkpoint and supplies the fold score, intentionally matching
+the baseline protocol. Set the adapter's loss metric/early-stopping settings
+accordingly. Complete fold macro F1 scores are averaged **without weighting by
+fold size**; this is not macro F1 recomputed from pooled out-of-fold predictions.
+
+The fixed acceptance rule is:
+
+```text
+trial_mean_macro_F1 + numerical_tolerance >= original_Full_mean_macro_F1
+```
+
+Precision, recall, sample SD and SE remain diagnostics. There is no mean-minus-SE
+allowance, moving reference or requirement to win every individual fold. All
+trials complete all supplied folds; this first implementation runs folds
+sequentially and accepts `BatchRemovalOptions`, not the Train-only CV
+`SelectionSpeedOptions` pruning mode.
+
+The existing ascending-SHAP/batch/backoff/retry search is preserved. With 320
+features and fraction 0.1, a rejected batch shrinks 32 → 16 → 8 → 4 → 2 → 1.
+A failed batch does not mark its members individually failed. A rejected
+singleton becomes temporarily ineligible. An accepted removal resets failed
+singletons and batch size, so previously rejected features can be retried in the
+new configuration. Zero fraction requests single-feature removal.
+
+Full and **accepted** candidates receive a new fit on all development, without
+an eval_set or early stopping. Its requested boosting-round budget is
+`ceil(median(best_rounds_per_fold))`, using one-based rounds (including the +1
+conversion for zero-based CatBoost/XGBoost best iterations). Each candidate uses
+its own CV rounds, not Full's budget. Native learners can still stop intrinsically
+if no valid split remains, especially LightGBM. Fold-only callbacks are not reused
+during refit. SHAP ranking is calculated on development using this refitted model;
+it is not out-of-fold SHAP. Rejected candidates receive no development refit and
+leave the accepted model/ranking unchanged. The last accepted refit is the final
+estimator; no fold model is deployed and no additional final fit is necessary.
+
+Custom adapters additionally implement `best_rounds(model)` and
+`refit(X_dev, y_dev, rounds)` (see `CVRefitAdapter`). Native CatBoost, XGBoost and
+LightGBM adapters provide these operations. Existing adapters/settings are not
+mutated. Full reuse from an unrelated fitted estimator is intentionally absent
+from `fit_cv()` because its fold provenance would not be established.
+
+`selector.cv_evaluation_` records immutable external fold membership, complete
+fold summaries, per-trial best-round counts and accepted refit budgets.
+`SelectionReport` labels the score source **Validation CV mean**, exports fold
+scores/best rounds, membership, F1 gate constraints and an additional
+`*_cv_summary.csv` containing means/SD/SE/refit budgets. `audit_selection` replays
+fold coverage/disjointness, gate decisions, batch retries and median budgets.
+Native save/load uses format 7 for this protocol; formats 1–6 remain readable.
+
+Repeated adaptive use of these Validation folds is selection, not an independent
+performance estimate. Keep Test outside selection, SHAP, stopping and tuning.
+The fixed-F1 greedy search does not guarantee a global minimum feature set or
+unseen-data performance.
+
 ## Automatic full-reference CV quality gate
 
 `CVReferenceQualityPolicy` is an opt-in alternative to manual absolute floors and

@@ -37,6 +37,7 @@ class NotebookSelectionRecorder:
     def record(self, event):
         if event["event"] == "initialized":
             self._score_label = (
+                'Validation CV mean' if event.get('score_source') == 'validation_cv' else
                 "Train CV" if event.get("score_source") == "train_cv" else "Validation"
             )
             from IPython.display import display

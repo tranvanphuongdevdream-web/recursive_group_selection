@@ -10,6 +10,9 @@ class LightGBMAdapter(BaseModelAdapter):
     backend_name = "lightgbm"
     model_filename = "model.txt"
 
+    def best_rounds(self, model):
+        return int(getattr(model, 'best_iteration_', None) or self._booster(model).current_iteration())
+
     @staticmethod
     def model_class():
         try:

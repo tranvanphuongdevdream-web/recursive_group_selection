@@ -16,6 +16,7 @@ from .policies import (
     MacroQualityPolicy,
     CVReferenceQualityPolicy,
     F1ReferenceQualityPolicy,
+    CVF1ReferenceQualityPolicy,
 )
 from .results import (
     AcceptedState,
@@ -27,6 +28,8 @@ from .results import (
     CVScoreSummary,
     CVEvaluationTrace,
     CVPrunedEvaluation,
+    ValidationFold,
+    FixedCVEvaluationTrace,
 )
 
 
@@ -75,7 +78,7 @@ def save_selector(selector, directory):
 
     if (
         type(selector.quality_policy)
-        not in (MacroQualityPolicy, CVReferenceQualityPolicy, F1ReferenceQualityPolicy)
+        not in (MacroQualityPolicy, CVReferenceQualityPolicy, F1ReferenceQualityPolicy, CVF1ReferenceQualityPolicy)
         or type(selector.ranker) is not MeanAbsoluteShapRanker
     ):
         raise ValueError(
@@ -95,7 +98,7 @@ def save_selector(selector, directory):
         )
     metadata = {
         "format_version": (
-            6
+            7 if isinstance(selector.quality_policy, CVF1ReferenceQualityPolicy) else 6
             if isinstance(selector.quality_policy, F1ReferenceQualityPolicy)
             or isinstance(selector.speed_options, BatchRemovalOptions)
             else (
@@ -142,12 +145,15 @@ def save_selector(selector, directory):
         "model_file": selector.adapter_.model_filename,
     }
     if selector.cv_evaluation_ is not None:
-        from .cross_validation import validate_cv_trace
-
-        validate_cv_trace(selector.result_, selector.quality_policy)
-        metadata.update(
-            policy_type="cv_reference", cv_evaluation=asdict(selector.cv_evaluation_)
-        )
+        if isinstance(selector.quality_policy, CVF1ReferenceQualityPolicy):
+            from .fixed_cv import validate_fixed_cv_trace
+            validate_fixed_cv_trace(selector.result_, selector.quality_policy)
+            policy_type = 'fixed_cv_f1'
+        else:
+            from .cross_validation import validate_cv_trace
+            validate_cv_trace(selector.result_, selector.quality_policy)
+            policy_type = 'cv_reference'
+        metadata.update(policy_type=policy_type, cv_evaluation=asdict(selector.cv_evaluation_))
     # Validate serialization before writing any files.
     encoded = _encode(metadata)
     directory.mkdir(parents=True, exist_ok=True)
@@ -169,7 +175,7 @@ def load_selector(directory):
         json.loads((directory / "selection.json").read_text(encoding="utf-8"))
     )
     data = _migrate_metadata(data)
-    if data["format_version"] not in (2, 3, 4, 5, 6):
+    if data["format_version"] not in (2, 3, 4, 5, 6, 7):
         raise ValueError("Unsupported selection metadata version.")
     mode = (
         data.get("selection_mode", "group")
@@ -248,18 +254,23 @@ def load_selector(directory):
     policy_name = data.get("policy_type", "macro")
     if data["format_version"] in (4, 5) and policy_name != "cv_reference":
         raise ValueError("CV formats require CV policy metadata.")
-    if policy_name not in {"macro", "cv_reference", "f1_reference"}:
+    if (data['format_version'] == 7) != (policy_name == 'fixed_cv_f1'):
+        raise ValueError('External-fold F1 CV requires format 7 and matching policy metadata.')
+    if policy_name not in {"macro", "cv_reference", "f1_reference", 'fixed_cv_f1'}:
         raise ValueError("Unknown saved quality policy.")
     policy = {
         "macro": MacroQualityPolicy,
         "cv_reference": CVReferenceQualityPolicy,
         "f1_reference": F1ReferenceQualityPolicy,
+        'fixed_cv_f1': CVF1ReferenceQualityPolicy,
     }[policy_name](**data["policy"])
     cv_trace = (
         _restore_cv_trace(data["cv_evaluation"])
         if policy_name == "cv_reference"
         else None
     )
+    if policy_name == 'fixed_cv_f1':
+        cv_trace = _restore_fixed_cv_trace(data['cv_evaluation'])
     speed_type = data.get("speed_options_type", "cv")
     if speed_type not in {"batch", "cv"}:
         raise ValueError("Unknown saved speed options type.")
@@ -296,9 +307,12 @@ def load_selector(directory):
         ),
     )
     if cv_trace is not None:
-        from .cross_validation import validate_cv_trace
-
-        validate_cv_trace(result, policy)
+        if policy_name == 'fixed_cv_f1':
+            from .fixed_cv import validate_fixed_cv_trace
+            validate_fixed_cv_trace(result, policy)
+        else:
+            from .cross_validation import validate_cv_trace
+            validate_cv_trace(result, policy)
     selector_class = (
         RecursiveFeatureSelector if mode == "feature" else RecursiveGroupSelector
     )
@@ -320,7 +334,7 @@ def load_selector(directory):
     selector.attempted_group_ids_ = tuple(data["attempted_group_ids"])
     selector.rejected_group_ids_ = tuple(data["rejected_group_ids"])
     selector._set_result(result)
-    if data["format_version"] == 6:
+    if data["format_version"] in (6, 7):
         from .evaluation import audit_selection
 
         audit_selection(
@@ -403,3 +417,16 @@ def _restore_cv_trace(data):
         tuple(data["labels"]),
         tuple(data["group_ids"]) if data["group_ids"] is not None else None,
     )
+
+
+def _restore_fixed_cv_trace(data):
+    def summary(value):
+        return CVScoreSummary(tuple(MacroScores(**score) for score in value['fold_scores']),
+            MacroScores(**value['mean']), MacroScores(**value['standard_deviation']),
+            MacroScores(**value['standard_error']), value['training_seconds'], value['prediction_seconds'])
+    return FixedCVEvaluationTrace(
+        tuple(ValidationFold(tuple(fold['train_rows']), tuple(fold['validation_rows']))
+              for fold in data['folds']), data['grouped'], summary(data['baseline']),
+        tuple(summary(item) for item in data['trials']), summary(data['final']),
+        tuple(tuple(rounds) for rounds in data['best_rounds']), tuple(data['refit_rounds']),
+        tuple(data['labels']), tuple(data['group_ids']) if data['group_ids'] is not None else None)

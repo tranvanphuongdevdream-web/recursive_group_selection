@@ -93,7 +93,7 @@ class SelectionResult:
     shap_history: tuple[ShapSnapshot, ...]
     timings: dict[str, float]
     stop_reason: str
-    cv_evaluation: "CVEvaluationTrace | None" = None
+    cv_evaluation: "CVEvaluationTrace | FixedCVEvaluationTrace | None" = None
     speed_options: Any = None
     gate_metrics: tuple[str, ...] = ("precision_macro", "recall_macro", "f1_macro")
 
@@ -139,4 +139,31 @@ class CVEvaluationTrace:
     validation_trials: tuple[MacroScores | None, ...]
     validation_final: MacroScores
     labels: tuple = ()
+    group_ids: tuple | None = None
+
+
+@dataclass(frozen=True)
+class ValidationFold:
+    """Development-local indices; Validation selects checkpoints and scores F1."""
+
+    train_rows: tuple[int, ...]
+    validation_rows: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class FixedCVEvaluationTrace:
+    """External two-part folds, complete CV scores, and accepted refit budgets.
+
+    best_rounds[0] describes Full; subsequent entries correspond to every trial.
+    refit_rounds corresponds to accepted_history, including the initial Full.
+    """
+
+    folds: tuple[ValidationFold, ...]
+    grouped: bool
+    baseline: CVScoreSummary
+    trials: tuple[CVScoreSummary, ...]
+    final: CVScoreSummary
+    best_rounds: tuple[tuple[int, ...], ...]
+    refit_rounds: tuple[int, ...]
+    labels: tuple
     group_ids: tuple | None = None

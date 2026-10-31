@@ -9,7 +9,7 @@ import numpy as np
 from .groups import FeatureGroups, labels, numeric_matrix
 from .acceleration import SelectionSpeedOptions, BatchRemovalOptions, RemovalPlanner
 from .importance import MeanAbsoluteShapRanker
-from .policies import MacroQualityPolicy, CVReferenceQualityPolicy
+from .policies import MacroQualityPolicy, CVReferenceQualityPolicy, CVF1ReferenceQualityPolicy
 from .cross_validation import make_folds, evaluate_folds
 from .results import (
     AcceptedState,
@@ -114,6 +114,8 @@ class _RecursiveSelectorBase:
         model parameters and training protocol. The caller owns its provenance.
         """
         self._is_fitted = False
+        if isinstance(self.quality_policy, CVF1ReferenceQualityPolicy):
+            raise ValueError('CVF1ReferenceQualityPolicy requires fit_cv() with external folds.')
         started = perf_counter()
         if feature_names is None and hasattr(X_train, "columns"):
             feature_names = list(X_train.columns)
@@ -456,6 +458,8 @@ class _RecursiveSelectorBase:
     def _set_result(self, result):
         self.result_ = result
         self.cv_evaluation_ = result.cv_evaluation
+        budgets = getattr(result.cv_evaluation, 'refit_rounds', ())
+        self.refit_rounds_ = budgets[-1] if budgets else None
         self.estimator_ = result.estimator
         self.selected_group_ids_ = result.selected_group_ids
         self.selected_columns_ = result.selected_columns
@@ -475,6 +479,22 @@ class _RecursiveSelectorBase:
             raise RuntimeError(
                 "Call fit() successfully or load() a saved selector first."
             )
+
+    def fit_cv(self, X_dev, y_dev, *, cv_splits, cv_groups=None,
+               feature_groups=None, feature_names=None):
+        """Select using supplied development Train/Validation folds and mean F1.
+
+        Requires CVF1ReferenceQualityPolicy. Every fold trains a fresh model;
+        Validation both monitors early stopping and supplies the fold score.
+        Full and accepted candidates are refitted without Validation using the
+        ceiling of median best boosting rounds. Test must never be supplied.
+        BatchRemovalOptions retains the existing batch/backoff/retry semantics.
+        """
+        from .fixed_cv import fit_fixed_cv
+
+        return fit_fixed_cv(self, X_dev, y_dev, cv_splits=cv_splits,
+                            cv_groups=cv_groups, feature_groups=feature_groups,
+                            feature_names=feature_names)
 
     def transform(self, X):
         """Select retained columns from the complete original feature schema."""

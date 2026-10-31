@@ -7,6 +7,7 @@ from .policies import (
     MacroQualityPolicy,
     CVReferenceQualityPolicy,
     F1ReferenceQualityPolicy,
+    CVF1ReferenceQualityPolicy,
 )
 from .selector import RecursiveFeatureSelector, RecursiveGroupSelector
 
@@ -19,6 +20,7 @@ __all__ = [
     "SelectionSpeedOptions",
     "BatchRemovalOptions",
     "F1ReferenceQualityPolicy",
+    "CVF1ReferenceQualityPolicy",
     "MeanAbsoluteShapRanker",
     "CatBoostAdapter",
     "XGBoostAdapter",

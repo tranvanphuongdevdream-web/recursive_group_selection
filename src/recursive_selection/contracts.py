@@ -17,6 +17,18 @@ class ShapProvider(Protocol):
         ...
 
 
+class CVRefitAdapter(ModelAdapter, Protocol):
+    """Additional capabilities required only by external-fold fit_cv()."""
+
+    def best_rounds(self, model: Any) -> int:
+        """One-based boosting rounds at the best Validation-loss checkpoint."""
+        ...
+
+    def refit(self, X: Any, y: Any, rounds: int) -> Any:
+        """Return a fresh model trained on all development, with no eval_set."""
+        ...
+
+
 class ClassificationPredictor(Protocol):
     """Evaluation capability; not required by the selector's ModelAdapter."""
     def predict(self, model: Any, X: Any) -> Any: ...

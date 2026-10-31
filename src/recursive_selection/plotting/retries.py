@@ -162,6 +162,7 @@ def plot_retry_history(
     cv_mode = result.cv_evaluation is not None
     margin_ax.set_xlabel(
         (
+            'Validation CV F1 margin' if hasattr(result.cv_evaluation, 'refit_rounds') else
             "Worst CV gate margin / rejection upper bound"
             if cv_mode
             else "Worst validation margin"

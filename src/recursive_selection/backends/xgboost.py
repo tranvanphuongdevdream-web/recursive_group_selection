@@ -8,6 +8,12 @@ class XGBoostAdapter(BaseModelAdapter):
     backend_name = "xgboost"
     model_filename = "model.json"
 
+    def best_rounds(self, model):
+        try:
+            return int(model.best_iteration)+1
+        except AttributeError:
+            return int(model.get_booster().num_boosted_rounds())
+
     @staticmethod
     def model_class():
         try:

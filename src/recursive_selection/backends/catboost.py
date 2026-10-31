@@ -8,6 +8,10 @@ class CatBoostAdapter(BaseModelAdapter):
     backend_name = "catboost"
     model_filename = "model.cbm"
 
+    def best_rounds(self, model):
+        best = model.get_best_iteration()
+        return int(best)+1 if best is not None and best >= 0 else int(model.tree_count_)
+
     @staticmethod
     def model_class():
         try:

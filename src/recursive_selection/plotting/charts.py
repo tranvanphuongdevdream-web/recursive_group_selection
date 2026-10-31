@@ -115,6 +115,8 @@ def plot_accepted_scores(
     ax.set_title(
         title
         or (
+            'Accepted Validation CV Macro Scores'
+            if hasattr(result.cv_evaluation, 'refit_rounds') else
             "Accepted Train CV Macro Scores"
             if result.cv_evaluation is not None
             else "Accepted Validation Macro Scores"

@@ -21,8 +21,12 @@ def selected(min_groups=1):
 
 
 @pytest.mark.parametrize("copy_on_write", [False, True])
-def test_reports_replay_retry_and_roundtrip(tmp_path, monkeypatch, copy_on_write):
-    monkeypatch.setattr(pd.options.mode, "copy_on_write", copy_on_write)
+def test_reports_replay_retry_and_roundtrip(tmp_path, request, copy_on_write):
+    # Pandas options are descriptors, not normal attributes. option_context also
+    # restores correctly when pandas 3 deprecates the copy_on_write attribute.
+    context = pd.option_context('mode.copy_on_write', copy_on_write)
+    context.__enter__()
+    request.addfinalizer(lambda: context.__exit__(None, None, None))
     selector, groups = selected()
     report = SelectionReport(selector.result_, feature_groups=groups, unit_name="sensor")
     assert report.trials["Decision"].tolist() == ["Rejected - try another", "Accepted", "Accepted",
