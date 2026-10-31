@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.4.0 (2026-10-31)
+
+### Features
+
+- Add external-fold mean F1 selection with median refits
+  ([`95c665c`](https://github.com/jenvn37hacker/recursive-selection/commit/95c665c4e53c6984d6f5daf63967518d0ac3f71d))
+
+
 ## v1.3.0 (2026-10-26)
 
 ### Features
