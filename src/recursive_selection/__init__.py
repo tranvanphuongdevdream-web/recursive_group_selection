@@ -1,7 +1,7 @@
 """Public API; optional model libraries are imported only when used."""
 
 from .acceleration import SelectionSpeedOptions, BatchRemovalOptions
-from .backends import CatBoostAdapter, LightGBMAdapter, XGBoostAdapter
+from .backends import CatBoostAdapter, LightGBMAdapter, XGBoostAdapter, SklearnGBCAdapter
 from .importance import MeanAbsoluteShapRanker
 from .policies import (
     MacroQualityPolicy,
@@ -25,4 +25,5 @@ __all__ = [
     "CatBoostAdapter",
     "XGBoostAdapter",
     "LightGBMAdapter",
+    "SklearnGBCAdapter",
 ]

@@ -4,8 +4,8 @@ A Python library for selecting **individual features or complete feature groups*
 through SHAP-guided recursive elimination, fresh model refits, fixed validation
 thresholds, and configuration-specific retries. Use it to select whole sensors,
 channels, or other groups of related columns, or to select individual columns.
-It supports numeric classification data with CatBoost, XGBoost, LightGBM, or a
-custom model adapter.
+It supports numeric classification data with CatBoost, XGBoost, LightGBM,
+scikit-learn GBC, or a custom model adapter.
 
 | Selection mode | Public class | Example |
 | --- | --- | --- |
@@ -100,11 +100,12 @@ two APIs over one shared search engine; the feature API does not duplicate the l
 | Quality policy | Define fixed thresholds and make pass/fail decisions |
 | Recorder | Receive copied events for logging, without mutable model/state access |
 
-Three backends are available: `CatBoostClassifier`, `XGBClassifier`, and
-`LGBMClassifier`. These libraries are imported when needed and are not bundled
-inside this library's wheel. The `shap` package is not required: each backend uses
-its library's native TreeSHAP API. XGBoost and LightGBM use their respective best
-iterations when computing SHAP.
+Four backends are available: `CatBoostClassifier`, `XGBClassifier`,
+`LGBMClassifier`, and scikit-learn's classic `GradientBoostingClassifier` via
+`SklearnGBCAdapter`. Optional libraries are imported when needed and are not
+bundled inside this wheel. CatBoost/XGBoost/LightGBM use native TreeSHAP and do
+not need `shap`. GBC needs the `gbc` extra for TreeSHAP. XGBoost and LightGBM use
+their respective best iterations when computing SHAP.
 
 This is a greedy search: the final configuration satisfies the thresholds, but
 the algorithm does not guarantee the globally smallest group set. When the stop
@@ -201,13 +202,14 @@ fig, ax = plot_importance_evolution(feature_selector.result_, unit_name="feature
 Bootstrap comparison remains independent of selection granularity: pass the
 reference and selected models' aligned predictions to `PairedClusterBootstrap`.
 
-Choose `XGBoostAdapter(params=...)` or `LightGBMAdapter(params=...)` explicitly for
-other supported models. All adapters accept keyword configuration only. Set seeds,
+Choose `XGBoostAdapter(params=...)`, `LightGBMAdapter(params=...)`, or
+`SklearnGBCAdapter(params=...)` explicitly for other supported models. All adapters
+accept keyword configuration only. Set seeds,
 model parameters and the early-stopping metric for the chosen backend. Different
 backends can produce different models, rankings and selection paths. Do not pass
 CatBoost-specific fit options to another backend. Five early-stopping rounds are
 used by default; CatBoost retains the best model, XGBoost uses its best iteration,
-and LightGBM uses an early-stopping callback.
+LightGBM uses an early-stopping callback, and GBC monitors external log loss.
 
 If a full model is already fitted, configure `params=full_model.get_params()` in
 the adapter and pass `full_model=full_model` to `fit()` to reuse it. The library
@@ -289,7 +291,10 @@ restored_features = RecursiveFeatureSelector.load("my_feature_selection")
 
 The native model (`.cbm`/`.json`/`.txt`) is saved alongside `selection.json`, which
 contains the schema, policy, backend configuration, classes, history, timings, and
-model SHA-256 hash. Pickle is not used. Only the final model is saved;
+model SHA-256 hash. These three backends do not use pickle. GBC uses
+`model.joblib` and requires `load(path, trusted=True)`; only load bundles from a
+trusted source, using matching scikit-learn/joblib versions. The hash detects
+modified bytes but does not authenticate a bundle's origin. Only the final model is saved;
 `full_model_` is `None` after loading.
 
 Version 0.5.0 writes metadata format 3 with the selection mode and restores the
@@ -303,6 +308,69 @@ The backend runtime version must be able to read the corresponding native model.
 Custom policies, rankers, backends, and callbacks that are not JSON-compatible
 require application-specific persistence. They are not automatically
 deserialized or executed from metadata.
+
+## Scikit-learn GradientBoostingClassifier
+
+Install `recursive-selection[gbc]` to include the optional `shap` runtime:
+
+```python
+from recursive_selection import (
+    SklearnGBCAdapter, RecursiveFeatureSelector,
+    CVF1ReferenceQualityPolicy, BatchRemovalOptions,
+)
+
+selector = RecursiveFeatureSelector(
+    model_adapter=SklearnGBCAdapter(
+        params=dict(n_estimators=1000, learning_rate=.03, max_depth=3,
+                    loss="log_loss", random_state=42),
+        early_stopping_rounds=5,
+    ),
+    quality_policy=CVF1ReferenceQualityPolicy(),
+    speed_options=BatchRemovalOptions(removal_fraction=.1),
+)
+selector.fit_cv(X_dev, y_dev, cv_splits=cv_splits, cv_groups=recording_groups)
+selector.save("gbc_selection")
+restored = RecursiveFeatureSelector.load("gbc_selection", trusted=True)
+```
+
+This adapter supports both `fit()` and `fit_cv()`, for feature or group selection.
+It uses sklearn's public `fit(monitor=...)` and `staged_predict_proba()` APIs to
+evaluate the supplied external Validation after each boosting stage. One persistent
+iterator advances one stage at a time; it does not repeatedly predict all prior
+stages. A strictly smaller Validation log loss updates the checkpoint
+(`min_delta=0`). After `early_stopping_rounds` stages without improvement, the
+fit stops. The model is trimmed to the best stage, including when it reaches
+`n_estimators`. Set `early_stopping_rounds=None` to train the entire budget.
+Checkpoint diagnostics are `best_iteration_` (zero-based),
+`best_validation_loss_`, and `validation_log_loss_` (including the patience tail).
+`adapter.best_rounds(model)` returns the one-based number of retained stages.
+
+Keep `n_iter_no_change=None`: sklearn's built-in stopping would make a separate
+internal split and is rejected by this adapter. `tol` and `validation_fraction`
+do not control external stopping. Warm starts, custom monitors and feature-dependent
+`init` estimators are rejected. `init=None` and `init="zero"` are supported.
+GBC does not have an `n_jobs` or GPU setting; a model fit is single-threaded.
+The existing selection gate, batching, retries and fixed-fold membership apply
+unchanged. Full and accepted `fit_cv()` configurations receive fresh development
+refits using their own ceil-median best-stage budgets, without a Validation split
+or stopping monitor.
+
+TreeSHAP explains each regression tree in `estimators_`, then adds **signed**
+contributions across stages, scaled by `learning_rate`, before the ranker takes
+absolute values. This supports multiclass without relying on TreeExplainer's
+unsupported direct multiclass GBC path. Output shape is `(samples, 1, features)`
+for binary or `(samples, classes, features)` for multiclass. These attributions
+explain raw `decision_function` margins, not probabilities. Constant initialization
+has no feature attribution. Computation visits each retained tree and can be slower
+than the other backends' native ensemble SHAP calls.
+
+Unlike the other three backends, GBC models use joblib serialization.
+`load(..., trusted=True)` is required for a trusted GBC bundle; never use that
+flag for an unknown source. Keep compatible sklearn/joblib versions for loading.
+CatBoost, XGBoost and LightGBM retain their existing native loading behavior.
+
+API references: [sklearn GBC](https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.GradientBoostingClassifier.html),
+[SHAP TreeExplainer](https://shap.readthedocs.io/en/stable/generated/shap.TreeExplainer.html).
 
 ## Extending backends
 
@@ -341,9 +409,9 @@ After building, replace the wheel filename below with the actual output filename
 & $libraryPython -m pip install ".\dist\recursive_selection-1.0.0-cp313-cp313-win_amd64.whl[catboost,plot,report]"
 ```
 
-Available extras are `catboost`, `xgboost`, `lightgbm`, `all`, `plot`, `report`,
+Available extras are `catboost`, `xgboost`, `lightgbm`, `gbc`, `all`, `plot`, `report`,
 `notebook`, `test`, and `dev`.
-You do not need to install all three model libraries. A `.pyd` binary cannot be
+You do not need to install all optional model libraries. A `.pyd` binary cannot be
 shared across all three operating systems. Compiling the orchestration code is
 not expected to substantially reduce training or SHAP computation costs.
 
@@ -361,7 +429,8 @@ $env:PYTHONDONTWRITEBYTECODE = "1"
 ```
 
 Tests for missing backends are skipped. Use `--require-all-backends` to require
-all three. Testing source does not invoke setup, Cython, or a compiler.
+all model libraries plus `shap` for GBC. Testing source does not invoke setup,
+Cython, or a compiler.
 To test an installed wheel, open a new terminal or remove the source directory
 from `PYTHONPATH`, run outside the checkout, and use:
 
@@ -419,7 +488,7 @@ Conventional commit + push to master
 | macOS Intel | 3.11, 3.12, 3.13 | macosx x86_64 |
 | macOS Apple Silicon | 3.11, 3.12, 3.13 | macosx arm64 |
 
-`cibuildwheel` requires all three model backends in its integration tests and
+`cibuildwheel` requires all four model backends (including GBC TreeSHAP) in its integration tests and
 checks that implementation modules come from `.pyd`/`.so`, not source. macOS
 backend tests install the OpenMP runtime `libomp` when needed. Backend users may
 also need this runtime according to their model library's instructions.
@@ -805,8 +874,8 @@ leave the accepted model/ranking unchanged. The last accepted refit is the final
 estimator; no fold model is deployed and no additional final fit is necessary.
 
 Custom adapters additionally implement `best_rounds(model)` and
-`refit(X_dev, y_dev, rounds)` (see `CVRefitAdapter`). Native CatBoost, XGBoost and
-LightGBM adapters provide these operations. Existing adapters/settings are not
+`refit(X_dev, y_dev, rounds)` (see `CVRefitAdapter`). All four built-in adapters
+provide these operations. Existing adapters/settings are not
 mutated. Full reuse from an unrelated fitted estimator is intentionally absent
 from `fit_cv()` because its fold provenance would not be established.
 

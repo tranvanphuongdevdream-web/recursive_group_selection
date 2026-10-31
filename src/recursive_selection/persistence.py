@@ -1,4 +1,4 @@
-"""Versioned JSON + native model files. Only built-in backends are restored."""
+"""Versioned JSON + model files. Joblib GBC loading requires explicit trust."""
 
 from dataclasses import asdict
 from hashlib import sha256
@@ -89,7 +89,7 @@ def save_selector(selector, directory):
             "Custom backend persistence must be implemented by the application."
         )
     specification = selector.adapter_.specification()
-    if specification["name"] not in {"catboost", "xgboost", "lightgbm"}:
+    if specification["name"] not in {"catboost", "xgboost", "lightgbm", "sklearn_gbc"}:
         raise ValueError("Native save/load supports built-in backends only.")
     directory = Path(directory)
     if directory.exists() and any(directory.iterdir()):
@@ -166,7 +166,7 @@ def save_selector(selector, directory):
     return directory
 
 
-def load_selector(directory):
+def load_selector(directory, *, trusted=False):
     from .groups import FeatureGroups
     from .selector import RecursiveFeatureSelector, RecursiveGroupSelector
 
@@ -191,6 +191,8 @@ def load_selector(directory):
     model_path = directory / adapter.model_filename
     if _hash(model_path) != data["model_sha256"]:
         raise ValueError("Saved model hash differs from selection metadata.")
+    if adapter.backend_name == 'sklearn_gbc' and trusted is not True:
+        raise ValueError('GBC bundles use joblib: load only a trusted source with trusted=True.')
     model = adapter.load_model(model_path, data["classes"])
     groups = FeatureGroups(
         {int(k): v for k, v in data["feature_groups"].items()}, data["n_features_in"]

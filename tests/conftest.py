@@ -14,7 +14,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--require-all-backends",
         action="store_true",
-        help="Require all three integration dependencies.",
+        help="Require all backend integration dependencies, including GBC TreeSHAP.",
     )
 
 
@@ -22,7 +22,7 @@ def pytest_sessionstart(session):
     if session.config.getoption("--require-all-backends"):
         missing = [
             name
-            for name in ("catboost", "xgboost", "lightgbm")
+            for name in ("catboost", "xgboost", "lightgbm", "shap")
             if importlib.util.find_spec(name) is None
         ]
         if missing:
@@ -45,6 +45,7 @@ def pytest_sessionstart(session):
             "backends.catboost",
             "backends.xgboost",
             "backends.lightgbm",
+            "backends.sklearn_gbc",
             "importance.shap",
             "evaluation.bootstrap",
             "evaluation.results",

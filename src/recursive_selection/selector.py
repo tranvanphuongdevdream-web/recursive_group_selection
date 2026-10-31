@@ -525,17 +525,18 @@ class _RecursiveSelectorBase:
         return [record.as_dict() for record in self.history_]
 
     def save(self, directory):
-        """Save native model + explicit schema/history; does not pickle Python objects."""
+        """Save model + explicit schema/history (GBC uses a joblib model file)."""
         from .persistence import save_selector
 
         self._check_fitted()
         return save_selector(self, directory)
 
     @classmethod
-    def load(cls, directory):
+    def load(cls, directory, *, trusted=False):
+        """Restore a selection; GBC joblib bundles require trusted=True."""
         from .persistence import load_selector
 
-        selector = load_selector(directory)
+        selector = load_selector(directory, trusted=trusted)
         if selector._selection_mode != cls._selection_mode:
             raise ValueError(
                 f"Saved selection uses {selector._selection_mode} mode; load with {type(selector).__name__}."
