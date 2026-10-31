@@ -11,7 +11,7 @@ from .policies import (
 )
 from .selector import RecursiveFeatureSelector, RecursiveGroupSelector
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 __all__ = [
     "RecursiveGroupSelector",
     "RecursiveFeatureSelector",

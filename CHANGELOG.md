@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.5.0 (2026-10-31)
+
+### Features
+
+- Support sklearn gradient boosting classification
+  ([`74990c8`](https://github.com/jenvn37hacker/recursive-selection/commit/74990c836ca9f797b6c21a3e1a9cdbdb2c2ad7e1))
+
+- Track best CV F1 and parallelize external folds
+  ([`87d6c94`](https://github.com/jenvn37hacker/recursive-selection/commit/87d6c94397f857e7e9b9095ae313db7451cc46ed))
+
+
 ## v1.4.0 (2026-10-31)
 
 ### Features
