@@ -42,9 +42,8 @@ class SelectionSpeedOptions:
         budget = min(available, self.cpu_budget or available)
         jobs = min(self.cv_jobs, n_folds, budget)
         params = getattr(adapter, "params", {})
-        if str(params.get("task_type", "CPU")).upper() == "GPU" or params.get(
-            "device", "cpu"
-        ) in ("gpu", "cuda"):
+        device = str(params.get('device', params.get('device_type', 'cpu'))).lower()
+        if str(params.get("task_type", "CPU")).upper() == "GPU" or device.startswith(('gpu', 'cuda')):
             jobs = 1
         threads = max(1, budget // jobs)
         requested = params.get(
@@ -62,14 +61,23 @@ class SelectionSpeedOptions:
 
 @dataclass(frozen=True)
 class BatchRemovalOptions:
-    """Batch/backoff search with one full-Train model per Validation trial.
+    """Batch/backoff search; optionally parallelize folds in external fit_cv().
 
     Zero uses singleton removals. Batches can change the resulting search path.
+    cv_jobs/cpu_budget affect external CV only; trials remain sequential.
     """
 
     removal_fraction: float = 0.1
+    cv_jobs: int = 1
+    cpu_budget: int | None = None
 
     def __post_init__(self):
+        for name in ('cv_jobs', 'cpu_budget'):
+            value = getattr(self, name)
+            if value is None and name == 'cpu_budget':
+                continue
+            if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
+                raise ValueError(f'{name} must be a positive integer.')
         if (
             isinstance(self.removal_fraction, bool)
             or not isfinite(self.removal_fraction)
@@ -79,6 +87,9 @@ class BatchRemovalOptions:
 
     def to_config(self):
         return asdict(self)
+
+    def resources(self, n_folds, adapter):
+        return SelectionSpeedOptions(cv_jobs=self.cv_jobs, cpu_budget=self.cpu_budget).resources(n_folds, adapter)
 
 
 class RemovalPlanner:

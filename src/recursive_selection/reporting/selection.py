@@ -429,6 +429,39 @@ class SelectionReport:
                         for stat, attr in [('mean', 'mean'), ('SD', 'standard_deviation'),
                                            ('SE', 'standard_error')]}}
                     for trial, summary in enumerate((trace.baseline, *trace.trials))])
+                gate_rows = []
+                best = result.baseline_metrics.f1_macro
+                for trial in result.history:
+                    before = trial.f1_reference_before
+                    after = trial.f1_reference_after
+                    before = result.effective_floors.f1_macro if before is None else before
+                    after = before if after is None else after
+                    if trial.accepted:
+                        best = max(best, trial.metrics.f1_macro)
+                    gate_rows.append({'Step': trial.trial_id, 'Reference': trace.reference,
+                        'Full F1': result.baseline_metrics.f1_macro,
+                        'F1 reference before': before, 'Trial mean F1': trial.metrics.f1_macro,
+                        'F1 reference after': after, 'Best F1 so far': best,
+                        'Accepted': trial.accepted, 'Margin (pp)': 100*trial.worst_margin})
+                self.f1_reference_history = pd.DataFrame(gate_rows, columns=[
+                    'Step','Reference','Full F1','F1 reference before','Trial mean F1',
+                    'F1 reference after','Best F1 so far','Accepted','Margin (pp)'])
+                for name in ('Reference','Full F1','F1 reference before','Trial mean F1',
+                             'F1 reference after','Best F1 so far','Margin (pp)'):
+                    self.trials[name] = self.f1_reference_history[name].to_numpy()
+                self.cv_summary = self.cv_summary.merge(self.f1_reference_history.drop(
+                    columns=['Accepted']).rename(columns={'Step':'Trial'}), on='Trial',how='left')
+                initial = self.cv_summary.Trial.eq(0)
+                self.cv_summary.loc[initial, 'Reference'] = trace.reference
+                for name in ('Full F1','F1 reference before','Trial mean F1',
+                             'F1 reference after','Best F1 so far'):
+                    self.cv_summary.loc[initial, name] = result.baseline_metrics.f1_macro
+                self.cv_summary.loc[initial, 'Margin (pp)'] = 0.
+                self.cv_constraints['Reference'] = trace.reference
+                self.cv_constraints['Initial minimum'] = self.cv_constraints['Minimum']
+                if trace.reference == 'best':
+                    self.cv_constraints['Minimum'] = best
+                    self.cv_constraints['Margin'] = self.cv_constraints['Selected CV mean']-best
                 # Refits have no Validation prediction; all scoring is counted in CV.
                 self.selection_costs = self.selection_costs.loc[
                     self.selection_costs.Stage != 'Validation prediction'].copy()
@@ -504,7 +537,7 @@ class SelectionReport:
             "elimination_loop_time_seconds": r.timings["elimination_loop_seconds"],
             "score_source": self.score_source,
             "scope": (
-                'External-Validation-CV mean-F1-constrained greedy selection; fixed Full reference; no test guarantee'
+                f'External-Validation-CV mean-F1-constrained greedy selection; {r.cv_evaluation.reference} reference; no test guarantee'
                 if isinstance(r.cv_evaluation, FixedCVEvaluationTrace) else
                 "Train-CV-constrained greedy selection; baseline mean minus SE is a heuristic, not a test guarantee"
                 if r.cv_evaluation is not None
@@ -542,6 +575,7 @@ class SelectionReport:
             )
             if isinstance(self.result.cv_evaluation, FixedCVEvaluationTrace):
                 tables[f'{prefix}_cv_summary.csv'] = self.cv_summary
+                tables[f'{prefix}_f1_reference_history.csv'] = self.f1_reference_history
         generated = self.metadata()
         if set(metadata or {}).intersection(generated):
             raise ValueError(

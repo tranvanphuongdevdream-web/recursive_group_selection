@@ -1,4 +1,4 @@
-"""External Train/Validation folds, fixed Full mean-F1 gate, and median refits.
+"""External Train/Validation folds, best-so-far mean-F1 gate, and median refits.
 
 This protocol intentionally uses each Validation fold both for early stopping
 and scoring, matching caller-supplied baselines. It is distinct from the existing
@@ -7,6 +7,10 @@ Train-only fit/stopping/held-out protocol in cross_validation.py.
 
 from numbers import Integral
 from time import perf_counter
+from copy import copy, deepcopy
+from concurrent.futures import ThreadPoolExecutor
+
+from threadpoolctl import threadpool_limits
 
 import numpy as np
 
@@ -71,26 +75,71 @@ def evaluate_external_folds(selector, X, y, folds, classes, trial_id=0, forbidde
     adapter = selector.model_adapter
     scores, rounds, models = [], [], []
     training_seconds = prediction_seconds = 0.
-    for number, fold in enumerate(folds, 1):
-        model = adapter.new_model()
-        if any(model is previous for previous in (*models, *forbidden)):
-            raise ValueError('CV backend must return a fresh model for every fold.')
-        models.append(model)
+    options = selector.speed_options
+    jobs, threads = options.resources(len(folds), adapter) if options else (1, None)
+    # A default sequential fit retains the adapter's original thread settings.
+    managed = options is not None and (options.cv_jobs > 1 or options.cpu_budget is not None)
+
+    def run_fold(model, fold, worker):
         train, val = np.asarray(fold.train_rows), np.asarray(fold.validation_rows)
-        selector._emit('cv_fold_started', trial_id=trial_id, fold=number, folds=len(folds))
         tick = perf_counter()
-        adapter.fit(model, X[train], y[train], (X[val], y[val]))
-        training_seconds += perf_counter()-tick
-        selector._check_model(adapter, model, X.shape[1], classes)
-        best = adapter.best_rounds(model)
-        median_rounds((best,))  # Validate without truncating a backend's fractional result.
-        rounds.append(int(best))
+        worker.fit(model, X[train], y[train], (X[val], y[val]))
+        training = perf_counter()-tick
+        selector._check_model(worker, model, X.shape[1], classes)
+        best = worker.best_rounds(model)
+        median_rounds((best,))
         tick = perf_counter()
-        score = MacroScores.from_predictions(y[val], adapter.predict(model, X[val]), classes)
-        prediction_seconds += perf_counter()-tick
-        scores.append(score)
-        selector._emit('cv_fold_completed', trial_id=trial_id, fold=number,
-                       folds=len(folds), scores=score.as_dict(), best_rounds=int(best))
+        score = MacroScores.from_predictions(y[val], worker.predict(model, X[val]), classes)
+        return score, int(best), training, perf_counter()-tick
+
+    # Callbacks/events stay on the caller thread; collection is fold-ordered.
+    # Each fit has its own adapter configuration, model and stopping state.
+    with threadpool_limits(limits=threads if managed else None), ThreadPoolExecutor(max_workers=jobs) as pool:
+        pending = []
+        for number, fold in enumerate(folds, 1):
+            worker = adapter
+            if managed:
+                worker = copy(adapter)
+                if hasattr(adapter, 'params'):
+                    worker.params = deepcopy(adapter.params)
+                if hasattr(adapter, 'fit_params'):
+                    worker.fit_params = deepcopy(adapter.fit_params)
+                if getattr(worker, 'backend_name', '') == 'catboost':
+                    for config in (worker.params, worker.fit_params):
+                        for key in ('verbose', 'verbose_eval', 'logging_level', 'silent'):
+                            config.pop(key, None)
+                    worker.params['verbose'] = worker.fit_params['verbose'] = False
+            model = worker.new_model()
+            if any(model is previous for previous in (*models, *forbidden)):
+                raise ValueError('CV backend must return a fresh model for every fold.')
+            models.append(model)
+            if managed and getattr(worker, 'backend_name', '') in ('catboost', 'xgboost', 'lightgbm'):
+                parameter_name = 'thread_count' if worker.backend_name == 'catboost' else 'n_jobs'
+                thread_settings = {parameter_name: threads}
+                model.set_params(**thread_settings)
+            selector._emit('cv_fold_started', trial_id=trial_id, fold=number, folds=len(folds))
+            # Sequential mode completes each fold before starting the next, retaining
+            # historical event ordering and support for scripted adapters.
+            future = pool.submit(run_fold, model, fold, worker) if managed else None
+            pending.append((number, future, None if managed else run_fold(model, fold, worker)))
+            if managed:
+                continue
+            score, best, training, predicting = pending[-1][2]
+            training_seconds += training
+            prediction_seconds += predicting
+            rounds.append(int(best))
+            scores.append(score)
+            selector._emit('cv_fold_completed', trial_id=trial_id, fold=number,
+                           folds=len(folds), scores=score.as_dict(), best_rounds=int(best))
+        if managed:
+            for number, future, _ in pending:
+                score, best, training, predicting = future.result()
+                training_seconds += training
+                prediction_seconds += predicting
+                scores.append(score)
+                rounds.append(best)
+                selector._emit('cv_fold_completed', trial_id=trial_id, fold=number,
+                    folds=len(folds), scores=score.as_dict(), best_rounds=best)
     return summarize_scores(scores, training_seconds=training_seconds,
                             prediction_seconds=prediction_seconds), tuple(rounds)
 
@@ -137,6 +186,13 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
     timings.update(cv_fit_count=len(folds), cv_baseline_training_seconds=baseline.training_seconds,
                    cv_baseline_prediction_seconds=baseline.prediction_seconds)
     floors = selector.quality_policy.thresholds(baseline)
+    current_floors = floors
+    if selector.speed_options:
+        jobs, threads = selector.speed_options.resources(len(folds), adapter)
+        managed = selector.speed_options.cv_jobs > 1 or selector.speed_options.cpu_budget is not None
+        parameter = 'thread_count' if getattr(adapter, 'backend_name', '') == 'catboost' else 'n_jobs'
+        actual_threads = threads if managed else getattr(adapter, 'params', {}).get(parameter, 1)
+        timings.update(cv_workers=jobs, cv_threads_per_model=actual_threads)
 
     def refit(matrix, best, forbidden=()):
         budget = median_rounds(best)
@@ -185,7 +241,8 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
         timings['cv_fit_count'] += len(folds)
         timings['cv_trial_training_seconds'] += summary.training_seconds
         timings['cv_trial_prediction_seconds'] += summary.prediction_seconds
-        decision = selector.quality_policy.evaluate(summary.mean, floors)
+        before_f1 = current_floors.f1_macro
+        decision = selector.quality_policy.evaluate(summary.mean, current_floors)
         model, refit_seconds = None, 0.
         if decision.passed:
             model, budget, refit_seconds = refit(matrix, rounds, (full_model, current_model))
@@ -193,13 +250,15 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
             timings['trial_training_seconds'] += refit_seconds
             timings['trial_model_fit_count'] += 1
             timings['refit_fit_count'] += 1
+            current_floors = selector.quality_policy.advance(current_floors, summary.mean)
         change = MacroScores(*(getattr(summary.mean, key)-getattr(baseline.mean, key)
                                for key in baseline.mean.as_dict()))
         trial = TrialRecord(trial_id, configuration, removed[0], current_groups, proposed,
                             float(np.mean([ranking[group] for group in removed])), summary.mean,
                             change, decision.passed, decision.worst_margin, decision.failed_metrics,
                             summary.training_seconds+refit_seconds, summary.prediction_seconds,
-                            removed if selector.speed_options else (), 'mean')
+                            removed if selector.speed_options else (), 'mean',
+                            before_f1, current_floors.f1_macro)
         history.append(trial)
         attempted.update(removed)
         selector._emit('trial_completed', **trial.as_dict())
@@ -214,13 +273,13 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
         timings['shap_update_seconds'] += perf_counter()-tick
         snapshots.append(ShapSnapshot(configuration, trial_id, current_groups, tuple(ranking.items())))
         selector._emit('configuration_accepted', configuration_id=configuration, trial_id=trial_id,
-                       group_ids=current_groups, ranking=ranking)
+                       group_ids=current_groups, ranking=ranking, f1_reference=current_floors.f1_macro)
     timings['elimination_loop_seconds'] = perf_counter()-loop_started
     timings['total_fit_seconds'] = perf_counter()-started
     columns = groups.columns(current_groups)
     trace = FixedCVEvaluationTrace(folds, cv_groups is not None, baseline, tuple(summaries),
         current_summary, tuple(best_rounds), tuple(refit_budgets), tuple(y.tolist()),
-        tuple(cv_groups.tolist()) if cv_groups is not None else None)
+        tuple(cv_groups.tolist()) if cv_groups is not None else None, selector.quality_policy.reference)
     result = SelectionResult(current_model, current_groups, columns,
         tuple(names[column] for column in columns) if names is not None else None,
         baseline.mean, floors, current_summary.mean, tuple(history), tuple(accepted),
@@ -244,6 +303,8 @@ def validate_fixed_cv_trace(result, policy):
         raise ValueError('External Validation CV requires its own policy and trace.')
     if trace.grouped != (trace.group_ids is not None):
         raise ValueError('CV grouping metadata is inconsistent.')
+    if trace.reference != policy.reference:
+        raise ValueError('CV reference mode differs from the quality policy.')
     validate_external_folds(trace.folds, np.asarray(trace.labels),
                             np.asarray(trace.group_ids) if trace.grouped else None)
     if len(trace.trials) != len(result.history) or len(trace.best_rounds) != len(result.history)+1:
@@ -265,11 +326,25 @@ def validate_fixed_cv_trace(result, policy):
             raise ValueError('Invalid CV timing.')
     if not same(result.baseline_metrics, trace.baseline.mean) or not same(
             result.effective_floors, policy.thresholds(trace.baseline)):
-        raise ValueError('CV reference or fixed Full F1 threshold differs.')
+        raise ValueError('CV reference or initial Full F1 threshold differs.')
     selected, budgets = trace.baseline, [median_rounds(trace.best_rounds[0])]
+    floors = policy.thresholds(trace.baseline)
     for trial, summary, rounds in zip(result.history, trace.trials, trace.best_rounds[1:]):
         if not same(trial.metrics, summary.mean) or trial.metric_kind != 'mean':
             raise ValueError('Trial metrics must be the complete fold mean.')
+        decision = policy.evaluate(summary.mean, floors)
+        if (trial.accepted != decision.passed or trial.failed_metrics != decision.failed_metrics
+                or not np.isclose(trial.worst_margin, decision.worst_margin, rtol=0, atol=1e-12)):
+            raise ValueError('Trial decision differs from the running F1 reference.')
+        before = floors.f1_macro
+        if trial.accepted:
+            floors = policy.advance(floors, summary.mean)
+        if trial.f1_reference_before is None or trial.f1_reference_after is None:
+            if policy.reference != 'full':
+                raise ValueError('Missing best-so-far F1 reference evidence.')
+        elif not np.allclose([trial.f1_reference_before, trial.f1_reference_after],
+                             [before, floors.f1_macro], rtol=0, atol=1e-12):
+            raise ValueError('Recorded F1 reference transition differs.')
         if trial.accepted:
             selected = summary
             budgets.append(median_rounds(rounds))

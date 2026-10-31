@@ -57,7 +57,7 @@ def fit_scripted(development, fraction=.1, selector_class=RecursiveFeatureSelect
 
 
 def test_gate_is_only_mean_f1_with_fixed_full_reference():
-    policy = CVF1ReferenceQualityPolicy()
+    policy = CVF1ReferenceQualityPolicy(reference='full')
     summary = lambda fs: summarize_scores([MacroScores(.1, .2, f) for f in fs])
     full = summary([.7, .9, .7, .9])
     floors = policy.thresholds(full)
@@ -157,7 +157,8 @@ def test_fold_mean_is_not_pooled_out_of_fold_f1(development):
     assert selector.baseline_metrics_.f1_macro != pytest.approx(pooled.f1_macro)
 
 
-def test_selector_does_not_raise_floor_after_a_better_accepted_trial(development):
+@pytest.mark.parametrize('reference', ['full', 'best'])
+def test_selector_reference_after_a_better_accepted_trial(development, reference):
     X, y, splits, groups = development
     class ImprovedIntermediateAdapter(CVAdapter):
         def predict(self, model, matrix):
@@ -168,11 +169,11 @@ def test_selector_does_not_raise_floor_after_a_better_accepted_trial(development
                 predictions[0] = 1  # Full and final score below the intermediate perfect model.
             return predictions
     selector = RecursiveFeatureSelector(model_adapter=ImprovedIntermediateAdapter(),
-        ranker=TieRanker(), quality_policy=CVF1ReferenceQualityPolicy())
+        ranker=TieRanker(), quality_policy=CVF1ReferenceQualityPolicy(reference=reference))
     selector.fit_cv(X, y, cv_splits=splits, cv_groups=groups)
-    assert selector.selected_group_ids_ == (1, 2)
+    assert selector.selected_group_ids_ == ((1, 2) if reference=='full' else (1, 2, 4))
     assert selector.accepted_history_[1].metrics.f1_macro == 1
-    assert selector.final_metrics_.f1_macro == selector.baseline_metrics_.f1_macro < 1
+    assert selector.final_metrics_.f1_macro == (selector.baseline_metrics_.f1_macro if reference=='full' else 1)
     assert selector.effective_floors_.f1_macro == selector.baseline_metrics_.f1_macro
 
 
@@ -256,7 +257,7 @@ def test_native_external_cv_matches_manual_baseline_and_roundtrips(tmp_path, bac
     assert (tmp_path/'report/selection_cv_summary.csv').is_file()
     selector.save(tmp_path/'model')
     metadata = json.loads((tmp_path/'model/selection.json').read_text())
-    assert metadata['format_version'] == 7 and metadata['policy_type'] == 'fixed_cv_f1'
+    assert metadata['format_version'] == 8 and metadata['policy_type'] == 'fixed_cv_f1'
     restored = selector_class.load(tmp_path/'model')
     assert restored.refit_rounds_ == selector.refit_rounds_
     assert restored.cv_evaluation_ == selector.cv_evaluation_

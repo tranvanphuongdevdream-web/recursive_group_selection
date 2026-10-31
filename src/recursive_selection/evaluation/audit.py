@@ -85,7 +85,7 @@ def audit_selection(
     reference = result.cv_evaluation.baseline if cv_mode else result.baseline_metrics
     require(
         close(quality_policy.thresholds(reference), result.effective_floors),
-        "thresholds differ from the fixed full-model baseline",
+        "initial thresholds differ from full-model initialization",
     )
     require(
         quality_policy.evaluate(
@@ -105,6 +105,8 @@ def audit_selection(
     failed = planner.failed
     configuration, snapshot_index = 0, 0
     current_metrics, current_trial = result.baseline_metrics, 0
+    current_floors = result.effective_floors
+    accepted_margins = []
     before, final_trial_ids = {}, []
 
     def check_snapshot():
@@ -132,7 +134,7 @@ def audit_selection(
         )
         require(all(np.isfinite(v) and v >= 0 for _, v in pairs), "invalid importance")
         require(
-            quality_policy.evaluate(state.metrics, result.effective_floors).passed,
+            quality_policy.evaluate(state.metrics, current_floors).passed,
             "accepted state violates quality thresholds",
         )
         return dict(pairs)
@@ -176,7 +178,7 @@ def audit_selection(
                 ),
                 "metric change differs from full baseline",
             )
-        decision = quality_policy.evaluate(trial.metrics, result.effective_floors)
+        decision = quality_policy.evaluate(trial.metrics, current_floors)
         require(
             trial.accepted == decision.passed
             and trial.failed_metrics == decision.failed_metrics,
@@ -198,6 +200,9 @@ def audit_selection(
             final_trial_ids.append(trial.trial_id)
         planner.observe(removed, trial.accepted)
         if trial.accepted:
+            accepted_margins.append(decision.worst_margin)
+            if external_cv:
+                current_floors = quality_policy.advance(current_floors, trial.metrics)
             current, current_metrics, current_trial = (
                 proposed,
                 trial.metrics,
@@ -307,13 +312,9 @@ def audit_selection(
             "SHAP before pass",
         ],
     )
-    min_margin = (
-        min(
-            quality_policy.evaluate(s.metrics, result.effective_floors).worst_margin
-            for s in result.accepted_history
-        )
-        * 100
-    )
+    initial_margin = quality_policy.evaluate(result.baseline_metrics,
+        result.effective_floors).worst_margin
+    min_margin = min([initial_margin] + accepted_margins) * 100
     observations = [
         ("Feasible full-model initialization", "Passed", "Verified"),
         (
@@ -350,7 +351,7 @@ def audit_selection(
     ]
     if external_cv:
         observations.extend([
-            ('Gate score source', 'Fixed Full mean macro F1 on supplied Validation folds', 'Verified'),
+            ('Gate score source', f'{quality_policy.reference} reference mean macro F1 on supplied Validation folds', 'Verified'),
             ('Train/Validation separation',
              f'{len(result.cv_evaluation.folds)} external folds; Validation monitors loss and scores F1', 'Verified'),
             ('Development refit budget', 'Ceiling median of each accepted candidate\'s best fold rounds; no eval_set', 'Verified'),

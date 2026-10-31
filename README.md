@@ -810,8 +810,8 @@ selector = RecursiveFeatureSelector(
                 "verbose": False, "allow_writing_files": False},
         early_stopping_rounds=5,
     ),
-    quality_policy=CVF1ReferenceQualityPolicy(),
-    speed_options=BatchRemovalOptions(removal_fraction=0.1),
+    quality_policy=CVF1ReferenceQualityPolicy(reference="best"),
+    speed_options=BatchRemovalOptions(removal_fraction=0.1, cv_jobs=4, cpu_budget=6),
 )
 selector.fit_cv(
     X_dev, y_dev,
@@ -843,17 +843,43 @@ the baseline protocol. Set the adapter's loss metric/early-stopping settings
 accordingly. Complete fold macro F1 scores are averaged **without weighting by
 fold size**; this is not macro F1 recomputed from pooled out-of-fold predictions.
 
-The fixed acceptance rule is:
+The default acceptance rule uses the highest complete CV mean F1 found so far:
 
 ```text
-trial_mean_macro_F1 + numerical_tolerance >= original_Full_mean_macro_F1
+best_F1 = original_Full_mean_macro_F1
+PASS = trial_mean_macro_F1 + numerical_tolerance >= best_F1
+if PASS:
+    best_F1 = max(best_F1, trial_mean_macro_F1)
 ```
 
+For example, Full 78% → trial 80% PASS raises the threshold to 80%; a subsequent
+79% FAILS even though it exceeds Full. An equal 80% can PASS while reducing
+features. Numerical tolerance does not lower the running maximum.
+`CVF1ReferenceQualityPolicy(reference="full")` explicitly retains the former fixed
+Full rule. This setting changes external `fit_cv()` only; the single-Validation
+`F1ReferenceQualityPolicy` and Train-only CV policies retain their existing rules.
 Precision, recall, sample SD and SE remain diagnostics. There is no mean-minus-SE
-allowance, moving reference or requirement to win every individual fold. All
-trials complete all supplied folds; this first implementation runs folds
-sequentially and accepts `BatchRemovalOptions`, not the Train-only CV
-`SelectionSpeedOptions` pruning mode.
+allowance or requirement to win every individual fold. `best_F1` compares complete
+unweighted fold means, never the highest individual fold or a Test score.
+
+All trials complete all supplied folds. `BatchRemovalOptions(cv_jobs=4,
+cpu_budget=6)` runs up to four fold workers with a bounded CPU budget. For four
+CPU folds on a six-core budget, each model uses at most one thread. Available CPU
+quotas, fold count and a smaller budget can reduce worker count. GPU adapters use
+one worker. GBC has no `n_jobs` setting. Folds receive separate fresh models,
+adapter settings and stopping state; events are emitted on the caller thread and
+results are collected in fold order. Trials remain sequential: the next trial
+needs the accepted feature subset, updated SHAP and current F1 reference.
+One failed worker aborts the run without accepting a partial-fold score.
+`cv_jobs=1` is the default. No pruning or Train-only `SelectionSpeedOptions` is
+used in this protocol. Single-Validation `fit()` ignores these fold-worker options.
+
+For sequential/parallel comparisons, keep per-model thread counts and seeds the
+same. Changing a native learner's thread count can change floating-point results;
+parallelism is not a guarantee of identical checkpoints under different thread
+settings or of a fourfold speedup. Fold durations are summed in cost tables;
+`total_fit_seconds` is elapsed wall time. Development refits retain the original
+adapter's thread configuration after the fold pool has finished.
 
 The existing ascending-SHAP/batch/backoff/retry search is preserved. With 320
 features and fraction 0.1, a rejected batch shrinks 32 → 16 → 8 → 4 → 2 → 1.
@@ -883,13 +909,20 @@ from `fit_cv()` because its fold provenance would not be established.
 fold summaries, per-trial best-round counts and accepted refit budgets.
 `SelectionReport` labels the score source **Validation CV mean**, exports fold
 scores/best rounds, membership, F1 gate constraints and an additional
-`*_cv_summary.csv` containing means/SD/SE/refit budgets. `audit_selection` replays
-fold coverage/disjointness, gate decisions, batch retries and median budgets.
-Native save/load uses format 7 for this protocol; formats 1–6 remain readable.
+`*_cv_summary.csv` containing means/SD/SE/refit budgets. An additional
+`*_f1_reference_history.csv` records Full F1, the gate before each trial, trial
+mean F1, the gate after it, running best F1, decision and margin. Accepted-score
+charts show the running reference for best mode. `selector.best_f1_` reports the
+highest accepted F1, including Full; `effective_floors_` retains the **initial**
+Full threshold. Audit replays each threshold transition, fold coverage, gate
+decisions, batch retries and median budgets.
+New external-CV bundles use format 8 with explicit reference provenance.
+Legacy format 7 bundles load as `reference="full"`, preserving their original
+decisions; formats 1–6 remain readable. Older library versions cannot load format 8.
 
 Repeated adaptive use of these Validation folds is selection, not an independent
 performance estimate. Keep Test outside selection, SHAP, stopping and tuning.
-The fixed-F1 greedy search does not guarantee a global minimum feature set or
+The F1-constrained greedy search does not guarantee a global minimum feature set or
 unseen-data performance.
 
 ## Automatic full-reference CV quality gate

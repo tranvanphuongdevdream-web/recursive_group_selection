@@ -83,7 +83,7 @@ def plot_group_importance(
 def plot_accepted_scores(
     result, *, title=None, unit_name="group", figsize=(10, 5), ax=None
 ):
-    """Plot accepted macro scores and the fixed validation floors from a result."""
+    """Plot accepted macro scores and the configured fixed or best-so-far gate."""
     if not result.accepted_history:
         raise ValueError("At least one accepted configuration is required.")
     fig, ax = _axes(ax, figsize)
@@ -102,6 +102,11 @@ def plot_accepted_scores(
             label=label,
         )
         if key in result.gate_metrics:
+            if key == 'f1_macro' and getattr(result.cv_evaluation, 'reference', None) == 'best':
+                reference = np.maximum.accumulate([state.metrics.f1_macro for state in result.accepted_history])
+                ax.step(counts, 100*reference, where='post', color=color,
+                        linestyle='--', alpha=.6, label='Best F1 so far')
+                continue
             ax.axhline(
                 100 * minimum,
                 color=color,

@@ -467,6 +467,7 @@ class _RecursiveSelectorBase:
         self.baseline_metrics_ = result.baseline_metrics
         self.effective_floors_ = result.effective_floors
         self.final_metrics_ = result.final_metrics
+        self.best_f1_ = max(state.metrics.f1_macro for state in result.accepted_history)
         self.history_ = result.history
         self.accepted_history_ = result.accepted_history
         self.shap_history_ = result.shap_history

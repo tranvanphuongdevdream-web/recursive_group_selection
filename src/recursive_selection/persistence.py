@@ -98,7 +98,7 @@ def save_selector(selector, directory):
         )
     metadata = {
         "format_version": (
-            7 if isinstance(selector.quality_policy, CVF1ReferenceQualityPolicy) else 6
+            8 if isinstance(selector.quality_policy, CVF1ReferenceQualityPolicy) else 6
             if isinstance(selector.quality_policy, F1ReferenceQualityPolicy)
             or isinstance(selector.speed_options, BatchRemovalOptions)
             else (
@@ -175,7 +175,7 @@ def load_selector(directory, *, trusted=False):
         json.loads((directory / "selection.json").read_text(encoding="utf-8"))
     )
     data = _migrate_metadata(data)
-    if data["format_version"] not in (2, 3, 4, 5, 6, 7):
+    if data["format_version"] not in (2, 3, 4, 5, 6, 7, 8):
         raise ValueError("Unsupported selection metadata version.")
     mode = (
         data.get("selection_mode", "group")
@@ -256,16 +256,24 @@ def load_selector(directory, *, trusted=False):
     policy_name = data.get("policy_type", "macro")
     if data["format_version"] in (4, 5) and policy_name != "cv_reference":
         raise ValueError("CV formats require CV policy metadata.")
-    if (data['format_version'] == 7) != (policy_name == 'fixed_cv_f1'):
-        raise ValueError('External-fold F1 CV requires format 7 and matching policy metadata.')
+    if (data['format_version'] in (7, 8)) != (policy_name == 'fixed_cv_f1'):
+        raise ValueError('External-fold F1 CV requires format 7/8 and matching policy metadata.')
     if policy_name not in {"macro", "cv_reference", "f1_reference", 'fixed_cv_f1'}:
         raise ValueError("Unknown saved quality policy.")
+    policy_config = dict(data['policy'])
+    if policy_name == 'fixed_cv_f1':
+        if data['format_version'] == 7:
+            if policy_config.get('reference', 'full') != 'full':
+                raise ValueError('Legacy format 7 requires the fixed Full reference.')
+            policy_config['reference'] = 'full'
+        elif 'reference' not in policy_config or 'reference' not in data['cv_evaluation']:
+            raise ValueError('Format 8 requires explicit F1 reference provenance.')
     policy = {
         "macro": MacroQualityPolicy,
         "cv_reference": CVReferenceQualityPolicy,
         "f1_reference": F1ReferenceQualityPolicy,
         'fixed_cv_f1': CVF1ReferenceQualityPolicy,
-    }[policy_name](**data["policy"])
+    }[policy_name](**policy_config)
     cv_trace = (
         _restore_cv_trace(data["cv_evaluation"])
         if policy_name == "cv_reference"
@@ -336,7 +344,7 @@ def load_selector(directory, *, trusted=False):
     selector.attempted_group_ids_ = tuple(data["attempted_group_ids"])
     selector.rejected_group_ids_ = tuple(data["rejected_group_ids"])
     selector._set_result(result)
-    if data["format_version"] in (6, 7):
+    if data["format_version"] in (6, 7, 8):
         from .evaluation import audit_selection
 
         audit_selection(
@@ -431,4 +439,5 @@ def _restore_fixed_cv_trace(data):
               for fold in data['folds']), data['grouped'], summary(data['baseline']),
         tuple(summary(item) for item in data['trials']), summary(data['final']),
         tuple(tuple(rounds) for rounds in data['best_rounds']), tuple(data['refit_rounds']),
-        tuple(data['labels']), tuple(data['group_ids']) if data['group_ids'] is not None else None)
+        tuple(data['labels']), tuple(data['group_ids']) if data['group_ids'] is not None else None,
+        data.get('reference', 'full'))

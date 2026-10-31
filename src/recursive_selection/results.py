@@ -57,6 +57,8 @@ class TrialRecord:
     validation_predict_seconds: float
     removed_group_ids: tuple[int, ...] = ()
     metric_kind: str = "mean"
+    f1_reference_before: float | None = None
+    f1_reference_after: float | None = None
 
     def as_dict(self):
         return asdict(self)
@@ -167,3 +169,4 @@ class FixedCVEvaluationTrace:
     refit_rounds: tuple[int, ...]
     labels: tuple
     group_ids: tuple | None = None
+    reference: str = 'full'

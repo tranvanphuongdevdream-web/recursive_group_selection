@@ -179,11 +179,24 @@ class F1ReferenceQualityPolicy:
 
 @dataclass(frozen=True)
 class CVF1ReferenceQualityPolicy(F1ReferenceQualityPolicy):
-    """Accept complete external-fold mean macro F1 against the fixed Full mean.
+    """Accept complete external-fold mean F1 against the best reference so far.
 
     No SD/SE allowance is subtracted. Other macro metrics remain diagnostics.
     Use with fit_cv(); the single-Validation and Train-only CV modes are unchanged.
     """
+
+    reference: str = 'best'
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.reference not in ('best', 'full'):
+            raise ValueError("reference must be 'best' or 'full'.")
+
+    def advance(self, floors, scores):
+        """Return the next threshold after acceptance; never lower the reference."""
+        self._validate(floors)
+        self._validate(scores)
+        return MacroScores(0., 0., max(floors.f1_macro, scores.f1_macro)) if self.reference == 'best' else floors
 
     def thresholds(self, baseline):
         from .results import CVScoreSummary
