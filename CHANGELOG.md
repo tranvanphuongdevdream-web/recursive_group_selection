@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.6.0 (2026-11-01)
+
+### Features
+
+- Release accuracy stopping and metadata recording splits]
+  ([`e5bed4f`](https://github.com/jenvn37hacker/recursive-selection/commit/e5bed4f6097293f3e37af143af70deb566393e6b))
+
+
 ## Unreleased
 
 ### Features
