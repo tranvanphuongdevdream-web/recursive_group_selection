@@ -1,9 +1,9 @@
-"""Classic sklearn GBC with external loss stopping and additive raw TreeSHAP."""
+"""Classic sklearn GBC with external Accuracy stopping and additive raw TreeSHAP."""
 from copy import deepcopy
 from numbers import Integral
 
 import numpy as np
-from sklearn.metrics import log_loss
+from sklearn.metrics import log_loss, accuracy_score
 
 from ._base import BaseModelAdapter
 
@@ -11,30 +11,38 @@ from ._base import BaseModelAdapter
 class _ValidationMonitor:
     """Advance one persistent public staged-prediction iterator per fitted stage."""
 
-    def __init__(self, X, y, patience):
+    def __init__(self, X, y, patience, metric):
         self.X, self.y, self.patience = X, y, patience
         self.predictions = None
+        self.classes = None
+        self.metric = metric
         self.losses = []
+        self.accuracies = []
         self.best_loss = np.inf
+        self.best_accuracy = -np.inf
         self.best_rounds = 0
 
     def __call__(self, iteration, model, state):
         if self.predictions is None:
             self.predictions = model.staged_predict_proba(self.X)
+            self.classes = model.staged_predict(self.X)
         probability = next(self.predictions)
+        accuracy = float(accuracy_score(self.y, next(self.classes)))
         loss = float(log_loss(self.y, probability, labels=model.classes_))
         if not np.isfinite(loss):
             raise ValueError('Nonfinite external Validation log loss.')
         self.losses.append(loss)
-        if loss < self.best_loss:
-            self.best_loss, self.best_rounds = loss, iteration + 1
+        self.accuracies.append(accuracy)
+        improved = accuracy > self.best_accuracy if self.metric == 'accuracy' else loss < self.best_loss
+        if improved:
+            self.best_loss, self.best_accuracy, self.best_rounds = loss, accuracy, iteration + 1
         return iteration + 1 - self.best_rounds >= self.patience
 
 
 class SklearnGBCAdapter(BaseModelAdapter):
     """GradientBoostingClassifier; no hidden validation split or warm-start fits.
 
-    External stopping uses strict global Validation log-loss improvements
+    External stopping uses strict global Validation Accuracy improvements
     (min_delta=0) and keeps the best stage, not the patience tail. The estimator's
     tol/validation_fraction do not control this external rule.
     """
@@ -42,9 +50,11 @@ class SklearnGBCAdapter(BaseModelAdapter):
     backend_name = 'sklearn_gbc'
     model_filename = 'model.joblib'
 
-    def __init__(self, *, params=None, fit_params=None, early_stopping_rounds=5):
+    def __init__(self, *, params=None, fit_params=None, early_stopping_rounds=5,
+                 early_stopping_metric='accuracy'):
         super().__init__(params=params, fit_params=fit_params,
-                         early_stopping_rounds=early_stopping_rounds)
+                         early_stopping_rounds=early_stopping_rounds,
+                         early_stopping_metric=early_stopping_metric)
         self._validate_parameters(self.params)
         if 'monitor' in self.fit_params:
             raise ValueError('monitor is managed by SklearnGBCAdapter.')
@@ -76,7 +86,7 @@ class SklearnGBCAdapter(BaseModelAdapter):
         X_val, y_val = eval_set
         if not np.array_equal(np.unique(y), np.unique(y_val)):
             raise ValueError('Train and external Validation must contain the same classes.')
-        monitor = _ValidationMonitor(X_val, y_val, int(patience))
+        monitor = _ValidationMonitor(X_val, y_val, int(patience), self.early_stopping_metric)
         model.fit(X, y, monitor=monitor, **options)
         best = monitor.best_rounds
         # predict/proba/SHAP must all use the same best-stage ensemble. Diagnostic
@@ -90,7 +100,10 @@ class SklearnGBCAdapter(BaseModelAdapter):
             model.oob_score_ = model.oob_scores_[-1]
         model.best_iteration_ = best - 1
         model.best_validation_loss_ = monitor.best_loss
+        model.best_validation_accuracy_ = monitor.best_accuracy
+        model.early_stopping_metric_ = self.early_stopping_metric
         model.validation_log_loss_ = np.asarray(monitor.losses)
+        model.validation_accuracy_ = np.asarray(monitor.accuracies)
 
     def best_rounds(self, model):
         return int(model.n_estimators_)

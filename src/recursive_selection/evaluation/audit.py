@@ -353,7 +353,8 @@ def audit_selection(
         observations.extend([
             ('Gate score source', f'{quality_policy.reference} reference mean macro F1 on supplied Validation folds', 'Verified'),
             ('Train/Validation separation',
-             f'{len(result.cv_evaluation.folds)} external folds; Validation monitors loss and scores F1', 'Verified'),
+             f'{len(result.cv_evaluation.folds)} external {result.cv_evaluation.fold_kind} folds; '
+             f'Validation monitors {result.cv_evaluation.checkpoint_metric} and scores F1', 'Verified'),
             ('Development refit budget', 'Ceiling median of each accepted candidate\'s best fold rounds; no eval_set', 'Verified'),
         ])
     elif cv_mode:

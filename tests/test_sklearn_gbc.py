@@ -39,7 +39,7 @@ def test_external_checkpoint_matches_independent_staged_loss(n_classes, subsampl
         if iteration - best >= 3:
             break
     assert evaluated < params['n_estimators']
-    adapter = SklearnGBCAdapter(params=params, early_stopping_rounds=3)
+    adapter = SklearnGBCAdapter(params=params, early_stopping_rounds=3, early_stopping_metric="configured")
     model = adapter.new_model()
     adapter.fit(model, X, y, (X_val, y_val))
     assert adapter.best_rounds(model) == best == model.n_estimators_
@@ -57,7 +57,7 @@ def test_external_checkpoint_matches_independent_staged_loss(n_classes, subsampl
 
 def test_monitor_advances_one_generator_and_cap_still_restores_best(monkeypatch):
     X, X_val, y, y_val = data()
-    adapter = SklearnGBCAdapter(params=dict(n_estimators=6, random_state=42), early_stopping_rounds=20)
+    adapter = SklearnGBCAdapter(params=dict(n_estimators=6, random_state=42), early_stopping_rounds=20, early_stopping_metric="configured")
     model = adapter.new_model()
     original = model.staged_predict_proba
     calls = []
@@ -156,7 +156,7 @@ def test_fixed_cv_scores_median_refit_audit_and_persistence(tmp_path, mode):
         n_redundant=0, n_classes=3, random_state=17)
     splits = list(StratifiedKFold(4, shuffle=True, random_state=42).split(X,y))
     params = dict(n_estimators=10, max_depth=2, random_state=42)
-    adapter = SklearnGBCAdapter(params=params)
+    adapter = SklearnGBCAdapter(params=params, early_stopping_metric="configured")
     scores, best = [], []
     # Independent sklearn fits and public staged predictions, not adapter.fit.
     for train, val in splits:

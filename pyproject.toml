@@ -27,6 +27,7 @@ Issues = "https://github.com/tranvanphuongdevdream-web/recursive-selection/issue
 Changelog = "https://github.com/tranvanphuongdevdream-web/recursive-selection/blob/master/CHANGELOG.md"
 
 [project.optional-dependencies]
+recording = ["pandas>=2.2,<4"]
 catboost = ["catboost>=1.2.8,<2"]
 xgboost = ["xgboost>=2.1,<4"]
 lightgbm = ["lightgbm>=4.3,<5"]

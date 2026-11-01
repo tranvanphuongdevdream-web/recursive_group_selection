@@ -23,8 +23,10 @@ from .results import (AcceptedState, CVScoreSummary, FixedCVEvaluationTrace,
                       ValidationFold)
 
 
-def validate_external_folds(cv_splits, y, groups=None):
-    """Copy/validate a complete K-fold partition without generating any splits."""
+def validate_external_folds(cv_splits, y, groups=None, *, fold_kind='partition'):
+    """Validate supplied partitions or explicit repeated holdouts, without reshuffling."""
+    if fold_kind not in ('partition', 'repeated'):
+        raise ValueError('fold_kind must be partition or repeated.')
     if groups is not None:
         groups = np.asarray(groups)
         if groups.ndim != 1 or len(groups) != len(y):
@@ -59,8 +61,12 @@ def validate_external_folds(cv_splits, y, groups=None):
             raise ValueError('Groups overlap between fold Train and Validation.')
         counts[validation] += 1
         folds.append(ValidationFold(tuple(map(int, train)), tuple(map(int, validation))))
-    if len(folds) < 2 or not np.all(counts == 1):
+    if len(folds) < 2:
+        raise ValueError('Use at least two folds.')
+    if fold_kind == 'partition' and not np.all(counts == 1):
         raise ValueError('Use at least two folds; every development row must be Validation exactly once.')
+    if fold_kind == 'repeated' and len({tuple(sorted(f.validation_rows)) for f in folds}) != len(folds):
+        raise ValueError('Repeated holdouts must have distinct Validation memberships.')
     return tuple(folds), groups
 
 
@@ -145,7 +151,7 @@ def evaluate_external_folds(selector, X, y, folds, classes, trial_id=0, forbidde
 
 
 def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
-                 feature_groups=None, feature_names=None):
+                 feature_groups=None, feature_names=None, fold_kind='partition'):
     selector._is_fitted = False
     started = perf_counter()
     if not isinstance(selector.quality_policy, CVF1ReferenceQualityPolicy):
@@ -175,7 +181,7 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
     groups = FeatureGroups(feature_groups, X.shape[1])
     if selector.min_groups > len(groups.group_ids):
         raise ValueError('Minimum selection count exceeds the supplied units.')
-    folds, cv_groups = validate_external_folds(cv_splits, y, cv_groups)
+    folds, cv_groups = validate_external_folds(cv_splits, y, cv_groups, fold_kind=fold_kind)
     timings = dict(full_training_seconds=0., baseline_prediction_seconds=0., initial_shap_seconds=0.,
                    trial_training_seconds=0., validation_prediction_seconds=0., shap_update_seconds=0.,
                    trial_model_fit_count=0, cv_fit_count=0, refit_fit_count=0,
@@ -279,7 +285,8 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
     columns = groups.columns(current_groups)
     trace = FixedCVEvaluationTrace(folds, cv_groups is not None, baseline, tuple(summaries),
         current_summary, tuple(best_rounds), tuple(refit_budgets), tuple(y.tolist()),
-        tuple(cv_groups.tolist()) if cv_groups is not None else None, selector.quality_policy.reference)
+        tuple(cv_groups.tolist()) if cv_groups is not None else None, selector.quality_policy.reference,
+        fold_kind, getattr(adapter, 'early_stopping_metric', 'custom'))
     result = SelectionResult(current_model, current_groups, columns,
         tuple(names[column] for column in columns) if names is not None else None,
         baseline.mean, floors, current_summary.mean, tuple(history), tuple(accepted),
@@ -306,7 +313,16 @@ def validate_fixed_cv_trace(result, policy):
     if trace.reference != policy.reference:
         raise ValueError('CV reference mode differs from the quality policy.')
     validate_external_folds(trace.folds, np.asarray(trace.labels),
-                            np.asarray(trace.group_ids) if trace.grouped else None)
+                            np.asarray(trace.group_ids) if trace.grouped else None,
+                            fold_kind=trace.fold_kind)
+    if trace.checkpoint_metric not in ('configured', 'accuracy', 'custom'):
+        raise ValueError('Unknown CV checkpoint metric.')
+    if result.recording_split is not None:
+        split = result.recording_split.validate()
+        if (trace.fold_kind != 'repeated' or split.folds != trace.folds
+                or tuple(np.asarray(split.model_labels)[list(split.development_rows)]) != trace.labels
+                or split.development_groups != trace.group_ids):
+            raise ValueError('Recording split differs from the fitted development folds/labels/groups.')
     if len(trace.trials) != len(result.history) or len(trace.best_rounds) != len(result.history)+1:
         raise ValueError('CV trial or best-round history length differs.')
     def same(a, b):

@@ -548,6 +548,8 @@ class SelectionReport:
                 if r.cv_evaluation is not None
                 else {}
             ),
+            **({'recording_split': r.recording_split.to_config()}
+               if r.recording_split is not None else {}),
         }
 
     def save(self, directory, *, prefix="selection", metadata=None, overwrite=False):
@@ -576,6 +578,11 @@ class SelectionReport:
             if isinstance(self.result.cv_evaluation, FixedCVEvaluationTrace):
                 tables[f'{prefix}_cv_summary.csv'] = self.cv_summary
                 tables[f'{prefix}_f1_reference_history.csv'] = self.f1_reference_history
+        if self.result.recording_split is not None:
+            membership = self.result.recording_split.membership_table()
+            tables[f'{prefix}_recording_membership.csv'] = membership
+            tables[f'{prefix}_validation_coverage.csv'] = membership.drop_duplicates(
+                ['condition_id', 'recording_id'])
         generated = self.metadata()
         if set(metadata or {}).intersection(generated):
             raise ValueError(

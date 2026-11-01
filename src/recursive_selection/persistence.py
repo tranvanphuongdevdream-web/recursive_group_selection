@@ -98,6 +98,8 @@ def save_selector(selector, directory):
         )
     metadata = {
         "format_version": (
+            9 if selector.result_.recording_split is not None
+            or getattr(selector.cv_evaluation_, 'fold_kind', 'partition') == 'repeated' else
             8 if isinstance(selector.quality_policy, CVF1ReferenceQualityPolicy) else 6
             if isinstance(selector.quality_policy, F1ReferenceQualityPolicy)
             or isinstance(selector.speed_options, BatchRemovalOptions)
@@ -154,6 +156,8 @@ def save_selector(selector, directory):
             validate_cv_trace(selector.result_, selector.quality_policy)
             policy_type = 'cv_reference'
         metadata.update(policy_type=policy_type, cv_evaluation=asdict(selector.cv_evaluation_))
+    if selector.result_.recording_split is not None:
+        metadata['recording_split'] = selector.result_.recording_split.to_config()
     # Validate serialization before writing any files.
     encoded = _encode(metadata)
     directory.mkdir(parents=True, exist_ok=True)
@@ -175,7 +179,7 @@ def load_selector(directory, *, trusted=False):
         json.loads((directory / "selection.json").read_text(encoding="utf-8"))
     )
     data = _migrate_metadata(data)
-    if data["format_version"] not in (2, 3, 4, 5, 6, 7, 8):
+    if data["format_version"] not in (2, 3, 4, 5, 6, 7, 8, 9):
         raise ValueError("Unsupported selection metadata version.")
     mode = (
         data.get("selection_mode", "group")
@@ -256,8 +260,16 @@ def load_selector(directory, *, trusted=False):
     policy_name = data.get("policy_type", "macro")
     if data["format_version"] in (4, 5) and policy_name != "cv_reference":
         raise ValueError("CV formats require CV policy metadata.")
-    if (data['format_version'] in (7, 8)) != (policy_name == 'fixed_cv_f1'):
-        raise ValueError('External-fold F1 CV requires format 7/8 and matching policy metadata.')
+    if (data['format_version'] in (7, 8, 9)) != (policy_name == 'fixed_cv_f1'):
+        raise ValueError('External-fold F1 CV requires format 7/8/9 and matching policy metadata.')
+    if data['format_version'] == 9 and not all(
+            key in data.get('cv_evaluation', {}) for key in ('fold_kind', 'checkpoint_metric')):
+        raise ValueError('Format 9 requires fold kind and checkpoint metric provenance.')
+    if data['format_version'] != 9 and data.get('recording_split') is not None:
+        raise ValueError('Recording split provenance requires format 9.')
+    if (data['format_version'] != 9
+            and data.get('cv_evaluation', {}).get('fold_kind', 'partition') != 'partition'):
+        raise ValueError('Repeated holdouts require format 9.')
     if policy_name not in {"macro", "cv_reference", "f1_reference", 'fixed_cv_f1'}:
         raise ValueError("Unknown saved quality policy.")
     policy_config = dict(data['policy'])
@@ -317,6 +329,12 @@ def load_selector(directory, *, trusted=False):
         ),
     )
     if cv_trace is not None:
+        if policy_name == 'fixed_cv_f1' and cv_trace.checkpoint_metric != getattr(adapter, 'early_stopping_metric', 'custom'):
+            raise ValueError('Saved checkpoint metric differs from the backend configuration.')
+        if data.get('recording_split') is not None:
+            from .recording_split import RecordingSplit
+            from dataclasses import replace
+            result = replace(result, recording_split=RecordingSplit.from_config(data['recording_split']))
         if policy_name == 'fixed_cv_f1':
             from .fixed_cv import validate_fixed_cv_trace
             validate_fixed_cv_trace(result, policy)
@@ -344,7 +362,7 @@ def load_selector(directory, *, trusted=False):
     selector.attempted_group_ids_ = tuple(data["attempted_group_ids"])
     selector.rejected_group_ids_ = tuple(data["rejected_group_ids"])
     selector._set_result(result)
-    if data["format_version"] in (6, 7, 8):
+    if data["format_version"] in (6, 7, 8, 9):
         from .evaluation import audit_selection
 
         audit_selection(
@@ -440,4 +458,5 @@ def _restore_fixed_cv_trace(data):
         tuple(summary(item) for item in data['trials']), summary(data['final']),
         tuple(tuple(rounds) for rounds in data['best_rounds']), tuple(data['refit_rounds']),
         tuple(data['labels']), tuple(data['group_ids']) if data['group_ids'] is not None else None,
-        data.get('reference', 'full'))
+        data.get('reference', 'full'), data.get('fold_kind', 'partition'),
+        data.get('checkpoint_metric', 'configured'))

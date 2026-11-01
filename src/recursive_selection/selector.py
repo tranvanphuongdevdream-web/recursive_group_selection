@@ -457,6 +457,9 @@ class _RecursiveSelectorBase:
 
     def _set_result(self, result):
         self.result_ = result
+        self.split_ = result.recording_split
+        self.test_indices_ = self.split_.test_rows if self.split_ is not None else None
+        self.development_indices_ = self.split_.development_rows if self.split_ is not None else None
         self.cv_evaluation_ = result.cv_evaluation
         budgets = getattr(result.cv_evaluation, 'refit_rounds', ())
         self.refit_rounds_ = budgets[-1] if budgets else None
@@ -482,7 +485,7 @@ class _RecursiveSelectorBase:
             )
 
     def fit_cv(self, X_dev, y_dev, *, cv_splits, cv_groups=None,
-               feature_groups=None, feature_names=None):
+               feature_groups=None, feature_names=None, fold_kind='partition'):
         """Select using supplied development Train/Validation folds and mean F1.
 
         Requires CVF1ReferenceQualityPolicy. Every fold trains a fresh model;
@@ -495,7 +498,44 @@ class _RecursiveSelectorBase:
 
         return fit_fixed_cv(self, X_dev, y_dev, cv_splits=cv_splits,
                             cv_groups=cv_groups, feature_groups=feature_groups,
-                            feature_names=feature_names)
+                            feature_names=feature_names, fold_kind=fold_kind)
+
+    def fit_recording_cv(self, X, y, *, metadata=None, split_policy=None,
+                         parent_metadata=None, label_mapping=None, split=None,
+                         feature_groups=None, feature_names=None):
+        """Hold out Test, then select on four recording-disjoint development splits.
+
+        X is an already extracted feature matrix; metadata rows align with X/y.
+        Supply a SetupRecordingSplit policy or a validated RecordingSplit. Parent
+        metadata allocates source conditions before a class subset is retained.
+        No Test rows reach model fits, SHAP ranking or feature-selection scores.
+        """
+        from dataclasses import replace
+        from .recording_split import SetupRecordingSplit, RecordingSplit
+        self._is_fitted = False
+        if feature_names is None and hasattr(X, 'columns'):
+            feature_names = list(X.columns)
+        values = numeric_matrix(X, name='X', feature_names=feature_names)
+        target = labels(y, name='y', n_samples=len(values))
+        if split is None:
+            if metadata is None or not isinstance(split_policy, SetupRecordingSplit):
+                raise ValueError('Supply aligned metadata and a SetupRecordingSplit policy.')
+            split = split_policy.build(metadata, target, parent_metadata=parent_metadata,
+                                       label_mapping=label_mapping)
+        else:
+            if not isinstance(split, RecordingSplit):
+                raise TypeError('split must be a RecordingSplit.')
+            if any(item is not None for item in (metadata, split_policy, parent_metadata, label_mapping)):
+                raise ValueError('Use a saved split or metadata/policy, not both.')
+            split.validate()
+        if len(values) != len(split.sample_ids) or tuple(target.tolist()) != split.model_labels:
+            raise ValueError('X/y differ from the recording split row count/labels.')
+        dev = list(split.development_rows)
+        self.fit_cv(values[dev], target[dev], cv_splits=split.folds,
+                    cv_groups=split.development_groups, fold_kind='repeated',
+                    feature_groups=feature_groups, feature_names=feature_names)
+        self._set_result(replace(self.result_, recording_split=split))
+        return self
 
     def transform(self, X):
         """Select retained columns from the complete original feature schema."""

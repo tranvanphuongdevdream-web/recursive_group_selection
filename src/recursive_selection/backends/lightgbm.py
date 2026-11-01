@@ -26,7 +26,32 @@ class LightGBMAdapter(BaseModelAdapter):
         options = deepcopy(self.fit_params)
         rounds = self.stopping_rounds(options)
         callbacks = list(options.pop("callbacks", []))
-        if rounds is not None:
+        if self.early_stopping_metric == 'accuracy':
+            from lightgbm import callback
+            if any(type(item).__name__ == '_EarlyStoppingCallback' for item in callbacks):
+                raise ValueError('Accuracy stopping is managed by LightGBMAdapter.')
+            # Disable estimator aliases: only the scoped callback may stop a fit.
+            model.set_params(early_stopping_round=0, early_stopping_rounds=0,
+                             early_stopping=0)
+            def validation_accuracy(truth, probability):
+                codes = ((probability > .5).astype(int) if probability.ndim == 1
+                         else probability.argmax(axis=1))
+                return 'validation_accuracy', float(np.mean(codes == truth)), True
+            options['eval_metric'] = validation_accuracy
+            if rounds is not None:
+                stopping = early_stopping(rounds, first_metric_only=True, verbose=False)
+                def accuracy_stopping(env):
+                    scores = [item for item in env.evaluation_result_list
+                              if item[0] == 'valid_0' and item[1] == 'validation_accuracy']
+                    if len(scores) != 1:
+                        raise ValueError('Expected one external Validation Accuracy metric.')
+                    stopping(callback.CallbackEnv(model=env.model, params=env.params,
+                        iteration=env.iteration, begin_iteration=env.begin_iteration,
+                        end_iteration=env.end_iteration, evaluation_result_list=scores))
+                accuracy_stopping.order = 30
+                accuracy_stopping.before_iteration = False
+                callbacks.append(accuracy_stopping)
+        elif rounds is not None:
             callbacks.append(early_stopping(rounds, verbose=False))
         model.fit(X, y, eval_set=[eval_set], callbacks=callbacks, **options)
 

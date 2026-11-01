@@ -1,6 +1,8 @@
 """XGBoost native TreeSHAP, using exactly the trees used for prediction."""
 from copy import deepcopy
 
+import numpy as np
+
 from ._base import BaseModelAdapter, normalized_shap
 
 
@@ -26,7 +28,17 @@ class XGBoostAdapter(BaseModelAdapter):
         options = deepcopy(self.fit_params)
         # XGBoost >=2.1 configures early stopping on the estimator, not fit().
         rounds = self.stopping_rounds(options)
-        model.set_params(early_stopping_rounds=rounds)
+        if self.early_stopping_metric == 'accuracy':
+            from xgboost.callback import EarlyStopping
+            if self.params.get('callbacks') or options.get('callbacks'):
+                raise ValueError('Accuracy stopping callbacks are managed by XGBoostAdapter.')
+            metric = 'merror' if len(np.unique(y)) > 2 else 'error'
+            loss = 'mlogloss' if metric == 'merror' else 'logloss'
+            callbacks = [] if rounds is None else [EarlyStopping(rounds=rounds,
+                metric_name=metric, data_name='validation_0', maximize=False, save_best=True)]
+            model.set_params(early_stopping_rounds=None, eval_metric=[loss, metric], callbacks=callbacks)
+        else:
+            model.set_params(early_stopping_rounds=rounds)
         options.setdefault("verbose", False)
         model.fit(X, y, eval_set=[eval_set], **options)
 

@@ -22,6 +22,8 @@ class CatBoostAdapter(BaseModelAdapter):
 
     def fit(self, model, X, y, eval_set):
         options = deepcopy(self.fit_params)
+        if self.early_stopping_metric == 'accuracy':
+            model.set_params(eval_metric='Accuracy')
         options["early_stopping_rounds"] = self.stopping_rounds(options)
         options.setdefault("use_best_model", True)
         if options["use_best_model"] is not True:

@@ -9,7 +9,8 @@ class BaseModelAdapter:
     backend_name = ""
     model_filename = ""
 
-    def __init__(self, *, params=None, fit_params=None, early_stopping_rounds=5):
+    def __init__(self, *, params=None, fit_params=None, early_stopping_rounds=5,
+                 early_stopping_metric='accuracy'):
         if (early_stopping_rounds is not None and
                 (isinstance(early_stopping_rounds, bool)
                  or not isinstance(early_stopping_rounds, Integral)
@@ -18,6 +19,9 @@ class BaseModelAdapter:
         self.params = deepcopy(params or {})
         self.fit_params = deepcopy(fit_params or {})
         self.early_stopping_rounds = early_stopping_rounds
+        if early_stopping_metric not in ('accuracy', 'configured'):
+            raise ValueError("early_stopping_metric must be 'accuracy' or 'configured'.")
+        self.early_stopping_metric = early_stopping_metric
         forbidden = {"eval_set", "X", "y", "init_model", "xgb_model", "cat_features",
                      "text_features", "embedding_features", "categorical_feature",
                      "feature_name", "feature_names", "feature_weights"}
@@ -92,8 +96,17 @@ class BaseModelAdapter:
         if not isinstance(model, self.model_class()):
             raise ValueError("full_model is incompatible with the selected backend.")
         actual = model.get_params(deep=False)
+        expected = deepcopy(self.params)
+        if self.early_stopping_metric == 'accuracy':
+            if self.backend_name == 'catboost':
+                expected['eval_metric'] = 'Accuracy'
+            elif self.backend_name == 'xgboost':
+                metric = 'merror' if len(model.classes_) > 2 else 'error'
+                expected['eval_metric'] = ['mlogloss' if metric == 'merror' else 'logloss', metric]
+            for key in ('callbacks', 'early_stopping_round', 'early_stopping_rounds', 'early_stopping'):
+                expected.pop(key, None)
         different = []
-        for key, value in self.params.items():
+        for key, value in expected.items():
             candidate = actual.get(key)
             try:
                 equal = np.array_equal(value, candidate, equal_nan=True)
@@ -113,6 +126,7 @@ class BaseModelAdapter:
             "params": deepcopy(self.params),
             "fit_params": deepcopy(self.fit_params),
             "early_stopping_rounds": self.early_stopping_rounds,
+            "early_stopping_metric": self.early_stopping_metric,
         }
 
 

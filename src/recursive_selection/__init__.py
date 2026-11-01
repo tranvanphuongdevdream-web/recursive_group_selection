@@ -10,6 +10,7 @@ from .policies import (
     CVF1ReferenceQualityPolicy,
 )
 from .selector import RecursiveFeatureSelector, RecursiveGroupSelector
+from .recording_split import SetupRecordingSplit, RecordingSplit
 
 __version__ = "1.5.0"
 __all__ = [
@@ -26,4 +27,6 @@ __all__ = [
     "XGBoostAdapter",
     "LightGBMAdapter",
     "SklearnGBCAdapter",
+    "SetupRecordingSplit",
+    "RecordingSplit",
 ]

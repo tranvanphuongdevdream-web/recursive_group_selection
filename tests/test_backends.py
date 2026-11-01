@@ -121,7 +121,7 @@ class RecordingModel:
 def test_xgboost_fit_converts_validation_and_configures_stopping_on_model():
     model = RecordingModel()
     X, y = np.ones((4, 2)), np.array([0, 1, 0, 1])
-    adapter = XGBoostAdapter(params={"early_stopping_rounds": 7})
+    adapter = XGBoostAdapter(params={"early_stopping_rounds": 7}, early_stopping_metric="configured")
     adapter.fit(model, X, y, (X, y))
     assert model.params["early_stopping_rounds"] == 7
     assert model.calls[0][2]["eval_set"] == [(X, y)]
@@ -149,7 +149,7 @@ def test_lightgbm_creates_fresh_early_stopping_callbacks(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "lightgbm", SimpleNamespace(early_stopping=early_stopping))
     X, y = np.ones((4, 2)), np.array([0, 1, 0, 1])
-    adapter = LightGBMAdapter(params={}, early_stopping_rounds=9)
+    adapter = LightGBMAdapter(params={}, early_stopping_rounds=9, early_stopping_metric="configured")
     for _ in range(2):
         model = RecordingModel()
         adapter.fit(model, X, y, (X, y))
@@ -218,7 +218,7 @@ def test_supplied_catboost_baseline_is_not_retrained(tmp_path):
     full = module.CatBoostClassifier(**params)
     full.fit(X, y, eval_set=(X_val, y_val), early_stopping_rounds=5, use_best_model=True)
     before = full.predict(X_val).copy()
-    selector = RecursiveGroupSelector(model_adapter=CatBoostAdapter(params=params),
+    selector = RecursiveGroupSelector(model_adapter=CatBoostAdapter(params=params, early_stopping_metric='configured'),
                  quality_policy=MacroQualityPolicy(0, 0, 0, 1))
     selector.fit(X, y, eval_set=(X_val, y_val), feature_groups={1: [0, 1], 2: [2, 3], 3: [4, 5]}, full_model=full)
     assert selector.timings_["full_training_seconds"] == 0

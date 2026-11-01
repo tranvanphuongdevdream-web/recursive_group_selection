@@ -12,4 +12,5 @@ def adapter_from_specification(spec):
     if name not in adapters:
         raise ValueError("Persistence supports built-in backends only.")
     return adapters[name](params=spec["params"], fit_params=spec["fit_params"],
-                          early_stopping_rounds=spec["early_stopping_rounds"])
+                          early_stopping_rounds=spec["early_stopping_rounds"],
+                          early_stopping_metric=spec.get('early_stopping_metric', 'configured'))

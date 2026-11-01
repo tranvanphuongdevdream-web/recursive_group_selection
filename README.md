@@ -207,9 +207,16 @@ Choose `XGBoostAdapter(params=...)`, `LightGBMAdapter(params=...)`, or
 accept keyword configuration only. Set seeds,
 model parameters and the early-stopping metric for the chosen backend. Different
 backends can produce different models, rankings and selection paths. Do not pass
-CatBoost-specific fit options to another backend. Five early-stopping rounds are
-used by default; CatBoost retains the best model, XGBoost uses its best iteration,
-LightGBM uses an early-stopping callback, and GBC monitors external log loss.
+CatBoost-specific fit options to another backend. All built-in adapters default
+to `early_stopping_metric="accuracy"`, patience 5.
+CatBoost maximizes Validation Accuracy; LightGBM scopes its callback to external
+Validation Accuracy only; XGBoost minimizes `merror` (multiclass) or `error`
+(binary) and saves the best ensemble; GBC maximizes external Validation Accuracy.
+Training objectives remain their configured losses. Accuracy ties keep the first
+maximum; log loss does not break those ties. Each fit receives fresh stopping state.
+Use `early_stopping_metric="configured"` to retain native caller-configured metrics
+(or the former external log-loss monitor for GBC). Old saved adapter specifications
+without this field restore that former behavior.
 
 If a full model is already fitted, configure `params=full_model.get_params()` in
 the adapter and pass `full_model=full_model` to `fit()` to reuse it. The library
@@ -335,14 +342,15 @@ restored = RecursiveFeatureSelector.load("gbc_selection", trusted=True)
 
 This adapter supports both `fit()` and `fit_cv()`, for feature or group selection.
 It uses sklearn's public `fit(monitor=...)` and `staged_predict_proba()` APIs to
-evaluate the supplied external Validation after each boosting stage. One persistent
-iterator advances one stage at a time; it does not repeatedly predict all prior
-stages. A strictly smaller Validation log loss updates the checkpoint
-(`min_delta=0`). After `early_stopping_rounds` stages without improvement, the
+evaluate the supplied external Validation after each boosting stage. Persistent
+staged probability/class iterators advance once per stage; they do not repeatedly predict all prior
+stages. A strictly larger Validation Accuracy updates the checkpoint
+(`min_delta=0`); configured legacy mode instead minimizes log loss. After `early_stopping_rounds` stages without improvement, the
 fit stops. The model is trimmed to the best stage, including when it reaches
 `n_estimators`. Set `early_stopping_rounds=None` to train the entire budget.
 Checkpoint diagnostics are `best_iteration_` (zero-based),
-`best_validation_loss_`, and `validation_log_loss_` (including the patience tail).
+`best_validation_loss_` (loss at the chosen checkpoint), `best_validation_accuracy_`,
+`validation_log_loss_` and `validation_accuracy_` (including the patience tail).
 `adapter.best_rounds(model)` returns the one-based number of retained stages.
 
 Keep `n_iter_no_change=None`: sklearn's built-in stopping would make a separate
@@ -790,6 +798,111 @@ Audits replay the recorded greedy rules, larger-ID importance ties and rejection
 reset, including minimum-group stopping and no-removal runs. They do not establish
 data provenance, independence or a global minimum.
 
+## Automatic recording-disjoint development/Test splits
+
+`fit_recording_cv()` accepts the entire **already extracted** two-dimensional
+feature matrix, labels and aligned per-sample metadata. It creates a fixed Test
+pool and four repeated Train/Validation holdouts, then selects on development only.
+It does not extract raw time-series features or search model hyperparameters.
+Install `recursive-selection[recording]` (pandas) to use metadata policies.
+
+```python
+from recursive_selection import (
+    RecursiveFeatureSelector, CatBoostAdapter, CVF1ReferenceQualityPolicy,
+    BatchRemovalOptions, SetupRecordingSplit, RecordingSplit,
+)
+
+selector = RecursiveFeatureSelector(
+    model_adapter=CatBoostAdapter(
+        params={"iterations": 1000, "depth": 4, "learning_rate": 0.03,
+                "loss_function": "MultiClass", "random_seed": 42,
+                "thread_count": 1, "verbose": False, "allow_writing_files": False},
+        early_stopping_rounds=5, early_stopping_metric="accuracy",
+    ),
+    quality_policy=CVF1ReferenceQualityPolicy(reference="best"),
+    speed_options=BatchRemovalOptions(removal_fraction=0.1, cv_jobs=4, cpu_budget=6),
+)
+selector.fit_recording_cv(
+    X, y, metadata=recording_metadata,
+    split_policy=SetupRecordingSplit.z24(seed=42),
+    feature_names=feature_names,
+)
+selector.split_.save("new_split_directory")
+# Only after selection/refit has finished; Test was never supplied to fit or SHAP:
+rows = list(selector.test_indices_)
+predictions = selector.predict(X[rows])  # use X.iloc[rows] for a DataFrame
+```
+
+Z24 metadata columns are `sample_id`, `condition_id`, `recording_id`, `setup_id`
+and `segment_id`; `verified`, when present, must be true. Metadata rows must match
+X/y row-for-row. Source Setup IDs 0..8 become groups 1..9. All ten segments of a
+recording stay together. The policy uses one outer RNG and a separate CV RNG,
+both seed 42, over sorted source conditions. Choose one Test from groups 3..7;
+choose four distinct Validation pairs from groups 2..8 excluding Test, minimum
+pair distance 2. Six eligible groups have Validation appearances [1,1,1,1,2,2];
+groups 1 and 9 remain Train. Each split has six Train / two Validation / one Test
+groups. This is repeated holdout evaluation, not exhaustive out-of-fold CV.
+Numerical group distance does not establish elapsed time or physical separation.
+Defaults match the baseline's canonical pair enumeration and RNG draw order.
+No label count or feature width is fixed in the library. Column names, index
+base, seeds, candidate groups, minimum distance and segments per recording are
+policy settings. This balanced protocol currently requires nine groups and four
+holdouts. Split SD/SE are descriptive; overlapping holdouts do not justify an
+independence assumption or inferential confidence interval.
+
+For OpenBridgeLAB, `SetupRecordingSplit.openbridgelab()` consumes `global_sample_id`,
+`label` (original source label), `recording_key`, `segment_id`, `source_datetime`.
+It orders whole recordings by source time per condition and uses `array_split`
+to form nine contiguous near-equal recording-count groups. Recording intervals
+must not overlap; timestamps must identify an unambiguous order. A group may
+contain many recordings, so six/two/one groups need not imply exact sample ratios.
+
+To retain the Damage 1/2 baseline's **parent** allocation, pass metadata for all
+three source conditions, without any Reference features or signals:
+
+```python
+active = parent_metadata.loc[parent_metadata.label.isin([1, 2])].reset_index(drop=True)
+# X_damage rows align with active; y_damage has already been mapped to 0/1.
+selector.fit_recording_cv(
+    X_damage, y_damage, metadata=active,
+    parent_metadata=parent_metadata, label_mapping={1: 0, 2: 1},
+    split_policy=SetupRecordingSplit.openbridgelab(seed=42),
+    feature_names=feature_names,
+)
+```
+
+Use a binary model objective (e.g. CatBoost `Logloss`) for that binary baseline.
+Allocation visits all parent source conditions before retaining active conditions;
+it never restarts RNG on the two model labels. Active conditions must be complete.
+Original source sample IDs/labels and model labels are kept separately. For the
+current baseline this preserves Test T6/T6, development 2030 and Test 250 rows;
+Z24 has development 1360 and Test 170 rows. Source/model IDs are not inferred
+from feature values or guessed from row counts.
+
+`split_.membership_table()` exposes input row, original sample/condition/recording,
+group, model label, pool, four roles and Validation count. `split_.folds` indexes
+**development locally**; `development_rows`/`test_rows` index the original input.
+`split_.save()` exports immutable recipe JSON, membership CSV and index NPZ.
+Reuse a saved recipe with `RecordingSplit.load(...)` and
+`selector.fit_recording_cv(X, y, split=saved_split)`. For existing baseline row
+indices use `RecordingSplit.from_indices(metadata, y, development_rows=...,
+test_rows=..., cv_splits=...)`; its fold indices are development-local. Predefined
+splits are validated for class/recording separation but do not claim the automatic
+policy's time/group constraints. Reuse requires the same input row order and labels.
+
+Full and every trial share folds. Only development rows reach fits, refits and
+SHAP. Acceptance compares the complete unweighted mean Validation macro F1 to
+the running best F1, retaining batch/backoff/retry and bounded parallel folds.
+Full and accepted subsets refit on all development with their own ceiling-median
+best-round budget and no eval_set or stopping callback. No fold model is deployed.
+Test indices are returned for an explicit final evaluation; `fit_recording_cv()`
+does not automatically score Test or let Test influence selection.
+
+Format 9 persists the split recipe and validates it against saved CV membership,
+labels, recording groups and source metadata on load. Old bundles remain readable.
+The final selected model is persisted; the in-memory `full_model_` is not restored.
+Selection reports additionally export recording membership and Validation coverage.
+
 ## External-fold mean F1 selection matching a baseline
 
 Use `fit_cv()` when the baseline already has fixed development Train/Validation
@@ -805,7 +918,7 @@ from recursive_selection import (
 selector = RecursiveFeatureSelector(
     model_adapter=CatBoostAdapter(
         params={"iterations": 1000, "depth": 4, "learning_rate": 0.03,
-                "loss_function": "MultiClass", "eval_metric": "MultiClass",
+                "loss_function": "MultiClass", "eval_metric": "Accuracy",
                 "random_seed": 42, "thread_count": 2,
                 "verbose": False, "allow_writing_files": False},
         early_stopping_rounds=5,
@@ -828,19 +941,22 @@ test_predictions = selector.predict(X_test)
 `cv_splits` indexes **X_dev locally**, not the original complete dataset. At least
 two folds are required; four is a caller choice rather than a library constant.
 Each fold must partition development into disjoint, nonempty, class-complete
-Train/Validation sets, and every development row must appear in Validation exactly
-once. Supplied `cv_groups` stay disjoint within every fold. For recording/time-block
+Train/Validation sets. By default (`fold_kind="partition"`), every development row
+must appear in Validation exactly once. Explicit `fold_kind="repeated"` allows
+unused/repeated Validation rows and requires distinct holdouts. It still enforces
+complete per-fold development coverage, class support and group separation.
+Supplied `cv_groups` stay disjoint within every fold. For recording/time-block
 experiments, supply the actual composite IDs used by the baseline (including the
 condition when IDs are only unique within a condition). The library does not
 construct or reshuffle these folds and never accepts a separate Test set.
 `RecursiveGroupSelector.fit_cv()` also requires its usual `feature_groups` mapping.
 
-The caller supplies the same fixed model hyperparameters, training seed and loss
+The caller supplies the same fixed model hyperparameters, training seed and checkpoint
 monitor as the baseline; there is no per-trial hyperparameter search. Full and
 every trial train a **fresh model for every fold**. Validation selects the
 early-stopping checkpoint and supplies the fold score, intentionally matching
-the baseline protocol. Set the adapter's loss metric/early-stopping settings
-accordingly. Complete fold macro F1 scores are averaged **without weighting by
+the baseline protocol. New adapters monitor Accuracy by default; set their patience
+and training objectives to match the baseline. Complete fold macro F1 scores are averaged **without weighting by
 fold size**; this is not macro F1 recomputed from pooled out-of-fold predictions.
 
 The default acceptance rule uses the highest complete CV mean F1 found so far:
@@ -916,7 +1032,9 @@ charts show the running reference for best mode. `selector.best_f1_` reports the
 highest accepted F1, including Full; `effective_floors_` retains the **initial**
 Full threshold. Audit replays each threshold transition, fold coverage, gate
 decisions, batch retries and median budgets.
-New external-CV bundles use format 8 with explicit reference provenance.
+Partition external-CV bundles use format 8 with explicit reference provenance.
+Repeated/automatic recording holdouts use format 9, including fold kind, checkpoint
+metric and (when present) the complete metadata split recipe.
 Legacy format 7 bundles load as `reference="full"`, preserving their original
 decisions; formats 1–6 remain readable. Older library versions cannot load format 8.
 

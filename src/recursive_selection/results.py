@@ -98,6 +98,7 @@ class SelectionResult:
     cv_evaluation: "CVEvaluationTrace | FixedCVEvaluationTrace | None" = None
     speed_options: Any = None
     gate_metrics: tuple[str, ...] = ("precision_macro", "recall_macro", "f1_macro")
+    recording_split: Any = None
 
 
 @dataclass(frozen=True)
@@ -170,3 +171,5 @@ class FixedCVEvaluationTrace:
     labels: tuple
     group_ids: tuple | None = None
     reference: str = 'full'
+    fold_kind: str = 'partition'
+    checkpoint_metric: str = 'configured'

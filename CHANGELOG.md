@@ -2,6 +2,16 @@
 
 <!-- version list -->
 
+## Unreleased
+
+### Features
+
+- Default built-in early stopping to Validation Accuracy (patience 5), with explicit
+  configured-metric compatibility for existing workflows and saved specifications.
+- Add metadata-based Z24/chronological recording holdouts, parent-preserving class
+  subsets, fixed Test indices, repeated Validation folds and format-9 split provenance.
+- Export recording membership and Validation coverage in selection reports.
+
 ## v1.5.0 (2026-10-31)
 
 ### Features
