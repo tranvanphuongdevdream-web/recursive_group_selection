@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.7.0 (2026-11-01)
+
+### Features
+
+- Support truncated full-reference CV F1 gates
+  ([`5e0e541`](https://github.com/jenvn37hacker/recursive-selection/commit/5e0e5415f44c583ac0035d637a02f7ed67b5121f))
+
+
 ## v1.6.0 (2026-11-01)
 
 ### Features
