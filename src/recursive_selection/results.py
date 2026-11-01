@@ -173,3 +173,4 @@ class FixedCVEvaluationTrace:
     reference: str = 'full'
     fold_kind: str = 'partition'
     checkpoint_metric: str = 'configured'
+    truncate_decimals: int | None = None

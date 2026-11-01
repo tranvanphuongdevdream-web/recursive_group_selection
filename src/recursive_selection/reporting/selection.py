@@ -419,6 +419,11 @@ class SelectionReport:
                 ignore_index=True,
             )
             if external_cv:
+                from ..policies import CVF1ReferenceQualityPolicy
+
+                gate_policy = CVF1ReferenceQualityPolicy(
+                    reference=trace.reference, truncate_decimals=trace.truncate_decimals)
+                full_gate = gate_policy.gate_value(result.baseline_metrics.f1_macro)
                 accepted_budgets = {state.trial_id: budget for state, budget in
                                     zip(result.accepted_history, trace.refit_rounds)}
                 self.cv_summary = pd.DataFrame([
@@ -440,28 +445,39 @@ class SelectionReport:
                         best = max(best, trial.metrics.f1_macro)
                     gate_rows.append({'Step': trial.trial_id, 'Reference': trace.reference,
                         'Full F1': result.baseline_metrics.f1_macro,
+                        'Truncation decimals': trace.truncate_decimals,
+                        'Full F1 gate': full_gate,
+                        'Trial F1 gate': gate_policy.gate_value(trial.metrics.f1_macro),
                         'F1 reference before': before, 'Trial mean F1': trial.metrics.f1_macro,
                         'F1 reference after': after, 'Best F1 so far': best,
                         'Accepted': trial.accepted, 'Margin (pp)': 100*trial.worst_margin})
                 self.f1_reference_history = pd.DataFrame(gate_rows, columns=[
-                    'Step','Reference','Full F1','F1 reference before','Trial mean F1',
+                    'Step','Reference','Full F1','Truncation decimals','Full F1 gate',
+                    'Trial F1 gate','F1 reference before','Trial mean F1',
                     'F1 reference after','Best F1 so far','Accepted','Margin (pp)'])
-                for name in ('Reference','Full F1','F1 reference before','Trial mean F1',
+                for name in ('Reference','Full F1','Truncation decimals','Full F1 gate',
+                             'Trial F1 gate','F1 reference before','Trial mean F1',
                              'F1 reference after','Best F1 so far','Margin (pp)'):
                     self.trials[name] = self.f1_reference_history[name].to_numpy()
                 self.cv_summary = self.cv_summary.merge(self.f1_reference_history.drop(
                     columns=['Accepted']).rename(columns={'Step':'Trial'}), on='Trial',how='left')
                 initial = self.cv_summary.Trial.eq(0)
                 self.cv_summary.loc[initial, 'Reference'] = trace.reference
-                for name in ('Full F1','F1 reference before','Trial mean F1',
-                             'F1 reference after','Best F1 so far'):
+                for name in ('Full F1','Trial mean F1','Best F1 so far'):
                     self.cv_summary.loc[initial, name] = result.baseline_metrics.f1_macro
+                for name in ('F1 reference before','F1 reference after'):
+                    self.cv_summary.loc[initial, name] = result.effective_floors.f1_macro
+                self.cv_summary.loc[initial, 'Truncation decimals'] = trace.truncate_decimals
+                self.cv_summary.loc[initial, ['Full F1 gate','Trial F1 gate']] = full_gate
                 self.cv_summary.loc[initial, 'Margin (pp)'] = 0.
                 self.cv_constraints['Reference'] = trace.reference
                 self.cv_constraints['Initial minimum'] = self.cv_constraints['Minimum']
                 if trace.reference == 'best':
-                    self.cv_constraints['Minimum'] = best
-                    self.cv_constraints['Margin'] = self.cv_constraints['Selected CV mean']-best
+                    self.cv_constraints['Minimum'] = gate_policy.gate_value(best)
+                self.cv_constraints['Truncation decimals'] = trace.truncate_decimals
+                self.cv_constraints['Selected F1 gate'] = gate_policy.gate_value(result.final_metrics.f1_macro)
+                self.cv_constraints['Margin'] = (
+                    self.cv_constraints['Selected F1 gate']-self.cv_constraints['Minimum'])
                 # Refits have no Validation prediction; all scoring is counted in CV.
                 self.selection_costs = self.selection_costs.loc[
                     self.selection_costs.Stage != 'Validation prediction'].copy()
@@ -526,6 +542,8 @@ class SelectionReport:
             "library_stop_reason": r.stop_reason,
             "library_timings_seconds": dict(r.timings),
             "gate_metrics": list(r.gate_metrics),
+            "cv_f1_reference": getattr(r.cv_evaluation, 'reference', None),
+            "truncate_decimals": getattr(r.cv_evaluation, 'truncate_decimals', None),
             "baseline_metrics": asdict(r.baseline_metrics),
             "effective_floors": asdict(r.effective_floors),
             "final_metrics": asdict(r.final_metrics),

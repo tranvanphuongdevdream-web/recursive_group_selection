@@ -286,7 +286,8 @@ def fit_fixed_cv(selector, X_dev, y_dev, *, cv_splits, cv_groups=None,
     trace = FixedCVEvaluationTrace(folds, cv_groups is not None, baseline, tuple(summaries),
         current_summary, tuple(best_rounds), tuple(refit_budgets), tuple(y.tolist()),
         tuple(cv_groups.tolist()) if cv_groups is not None else None, selector.quality_policy.reference,
-        fold_kind, getattr(adapter, 'early_stopping_metric', 'custom'))
+        fold_kind, getattr(adapter, 'early_stopping_metric', 'custom'),
+        selector.quality_policy.truncate_decimals)
     result = SelectionResult(current_model, current_groups, columns,
         tuple(names[column] for column in columns) if names is not None else None,
         baseline.mean, floors, current_summary.mean, tuple(history), tuple(accepted),
@@ -312,6 +313,8 @@ def validate_fixed_cv_trace(result, policy):
         raise ValueError('CV grouping metadata is inconsistent.')
     if trace.reference != policy.reference:
         raise ValueError('CV reference mode differs from the quality policy.')
+    if trace.truncate_decimals != policy.truncate_decimals:
+        raise ValueError('CV truncation precision differs from the quality policy.')
     validate_external_folds(trace.folds, np.asarray(trace.labels),
                             np.asarray(trace.group_ids) if trace.grouped else None,
                             fold_kind=trace.fold_kind)

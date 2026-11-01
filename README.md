@@ -974,6 +974,27 @@ features. Numerical tolerance does not lower the running maximum.
 `CVF1ReferenceQualityPolicy(reference="full")` explicitly retains the former fixed
 Full rule. This setting changes external `fit_cv()` only; the single-Validation
 `F1ReferenceQualityPolicy` and Train-only CV policies retain their existing rules.
+
+To compare against the fixed Full mean after truncating both sides to two decimal
+places, use:
+
+```python
+quality_policy = CVF1ReferenceQualityPolicy(reference="full", truncate_decimals=2)
+```
+
+Compute the complete unweighted fold mean first, then truncate toward zero
+(all F1 scores are nonnegative). Full `0.689989` gives a fixed gate of `0.68`;
+a trial mean of `0.688421` also gives `0.68` and passes, while `0.679999` gives
+`0.67` and fails. An accepted `0.708418` does not raise the fixed gate. This is
+truncation, rather than display rounding or an allowed fixed drop of `0.01`.
+Truncated gate values are compared exactly; `tolerance` applies only when
+`truncate_decimals=None`, the default. Raw fold scores, mean/SD/SE and the best
+observed F1 retain their original precision. The final model is the last accepted
+subset, so its raw F1 can be below Full or an earlier accepted subset.
+Reports include raw means, truncated gate values and precision. Format 10 bundles
+persist the precision in both the policy and CV trace and validate it on load;
+older untruncated bundles retain their original behavior.
+
 Precision, recall, sample SD and SE remain diagnostics. There is no mean-minus-SE
 allowance or requirement to win every individual fold. `best_F1` compares complete
 unweighted fold means, never the highest individual fold or a Test score.

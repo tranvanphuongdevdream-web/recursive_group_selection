@@ -1,7 +1,9 @@
 """Validation acceptance rules. They never change group or model state."""
 
 from dataclasses import asdict, dataclass
+from decimal import Decimal, ROUND_DOWN
 from math import isfinite
+from numbers import Integral, Real
 
 from .results import MacroScores, QualityDecision
 
@@ -179,28 +181,59 @@ class F1ReferenceQualityPolicy:
 
 @dataclass(frozen=True)
 class CVF1ReferenceQualityPolicy(F1ReferenceQualityPolicy):
-    """Accept complete external-fold mean F1 against the best reference so far.
+    """Compare complete external-fold mean F1 with a full or running reference.
 
     No SD/SE allowance is subtracted. Other macro metrics remain diagnostics.
+    Optional decimal truncation applies after averaging folds, to both sides of
+    the gate. Truncated comparisons are exact; tolerance only applies when
+    truncate_decimals is None. Raw scores remain unchanged in the result.
     Use with fit_cv(); the single-Validation and Train-only CV modes are unchanged.
     """
 
     reference: str = 'best'
+    truncate_decimals: int | None = None
 
     def __post_init__(self):
         super().__post_init__()
         if self.reference not in ('best', 'full'):
             raise ValueError("reference must be 'best' or 'full'.")
+        if self.truncate_decimals is not None and (
+            isinstance(self.truncate_decimals, bool)
+            or not isinstance(self.truncate_decimals, Integral)
+            or not 0 <= self.truncate_decimals <= 15
+        ):
+            raise ValueError('truncate_decimals must be None or an integer from 0 to 15.')
+
+    def gate_value(self, f1):
+        """Return the comparison value without modifying the stored raw F1."""
+        if isinstance(f1, bool) or not isinstance(f1, Real) or not isfinite(f1) or not 0 <= f1 <= 1:
+            raise ValueError('F1 must be finite and between 0 and 1.')
+        if self.truncate_decimals is None:
+            return float(f1)
+        # Decimal text avoids turning values such as .58 into .57 through
+        # binary floating-point multiplication before truncation.
+        quantum = Decimal(1).scaleb(-int(self.truncate_decimals))
+        return float(Decimal(str(f1)).quantize(quantum, rounding=ROUND_DOWN))
+
+    def evaluate(self, scores, thresholds):
+        if self.truncate_decimals is None:
+            return super().evaluate(scores, thresholds)
+        self._validate(scores)
+        self._validate(thresholds)
+        score, threshold = self.gate_value(scores.f1_macro), self.gate_value(thresholds.f1_macro)
+        failed = ('f1_macro',) if score < threshold else ()
+        return QualityDecision(not failed, score-threshold, failed)
 
     def advance(self, floors, scores):
         """Return the next threshold after acceptance; never lower the reference."""
         self._validate(floors)
         self._validate(scores)
-        return MacroScores(0., 0., max(floors.f1_macro, scores.f1_macro)) if self.reference == 'best' else floors
+        return MacroScores(0., 0., max(floors.f1_macro, self.gate_value(scores.f1_macro))) if self.reference == 'best' else floors
 
     def thresholds(self, baseline):
         from .results import CVScoreSummary
 
         if not isinstance(baseline, CVScoreSummary):
             raise TypeError('CVF1ReferenceQualityPolicy requires a full CVScoreSummary.')
-        return super().thresholds(baseline.mean)
+        floors = super().thresholds(baseline.mean)
+        return MacroScores(0., 0., self.gate_value(floors.f1_macro))
